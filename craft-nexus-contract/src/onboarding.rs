@@ -783,13 +783,33 @@ impl OnboardingContract {
         profile
     }
 
-    /// Get user profile by address
+    /// Read-only accessor for a user's profile, keyed by their Stellar
+    /// address.
+    ///
+    /// # Integration notes — issue #529
+    ///
+    /// - This is the canonical "is this address onboarded?" entrypoint
+    ///   for off-chain integrations. It **reverts** with
+    ///   `Error::UserNotFound` if no profile exists for `user`, so
+    ///   callers that want a non-erroring probe should wrap the call
+    ///   with the host's `try_invoke_contract` API and treat the
+    ///   `Err` case as "not onboarded".
+    /// - The returned `UserProfile` carries the user's role, status,
+    ///   verification flag, portfolio CID, and metadata fields needed
+    ///   by the escrow and reputation systems. Treat the response as
+    ///   a snapshot; the profile can be mutated by `update_role`,
+    ///   `deactivate_profile`, `verify_user`, `update_portfolio`, and
+    ///   `change_username`, each of which emits an event indexers
+    ///   can subscribe to instead of polling this function.
+    /// - The function is gas-only (no token movements) so it is safe
+    ///   to call from a simulation / preview path.
     ///
     /// # Arguments
     /// * `user` - User's wallet address
     ///
     /// # Returns
-    /// UserProfile if user exists, reverts otherwise
+    /// `UserProfile` if a profile exists, otherwise panics with
+    /// `Error::UserNotFound`.
     pub fn get_user(env: Env, user: Address) -> UserProfile {
         Self::get_user_profile(&env, user)
     }
@@ -951,10 +971,15 @@ impl OnboardingContract {
             .set(&DataKey::UserProfile(user.clone()), &profile);
         Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
 
-        // Emit event
+        // Issue #524 — event payload now carries the user's role at
+        // deactivation time. The role was overwritten in the
+        // `Deactivated` status above, so emitting the captured
+        // `profile.role` here lets an indexer attribute the
+        // deactivation to "an artisan left" vs "a customer left"
+        // without a follow-up profile read.
         env.events().publish(
             (Symbol::new(&env, "ProfileDeactivated"), user.clone()),
-            user,
+            (user, profile.role.clone()),
         );
     }
 
@@ -1603,15 +1628,21 @@ impl OnboardingContract {
 
     /// Set the token used to collect username change fees (admin only).
     pub fn set_username_fee_token(env: Env, token: Address) {
+        // Issue #526 — strict check-effect-interactions ordering.
+        // Load config (read-only) → require_auth(admin) → only then
+        // touch any persistent storage. The previous implementation
+        // called `extend_persistent` on the Config key before the auth
+        // check, so a non-admin caller could spam-extend Config TTL
+        // before being rejected. Matched layout applied to
+        // `set_username_fee_wallet` below.
         let config: OnboardingConfig = env
             .storage()
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
-
         config.platform_admin.require_auth();
 
+        Self::extend_persistent(&env, &DataKey::Config);
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeToken, &token);
@@ -1620,15 +1651,16 @@ impl OnboardingContract {
 
     /// Set the wallet that receives username change fees (admin only).
     pub fn set_username_fee_wallet(env: Env, wallet: Address) {
+        // Issue #526 — same ordering as `set_username_fee_token`
+        // above: require_auth runs before any TTL extension or write.
         let config: OnboardingConfig = env
             .storage()
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
-
         config.platform_admin.require_auth();
 
+        Self::extend_persistent(&env, &DataKey::Config);
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeWallet, &wallet);

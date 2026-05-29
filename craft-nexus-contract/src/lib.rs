@@ -1213,6 +1213,16 @@ impl CraftNexusContract {
         successful_delta: u32,
         disputed_delta: u32,
     ) -> bool {
+        // Issue #527 — short-circuit on the no-op call before paying
+        // for the persistent storage read of the onboarding contract
+        // address. If both reputation deltas are 0 the cross-contract
+        // call has no effect; returning `true` here saves a storage
+        // decode + a host `try_invoke_contract` on every escrow
+        // settlement where reputation didn't change.
+        if successful_delta == 0 && disputed_delta == 0 {
+            return true;
+        }
+
         let onboarding = match Self::get_onboarding_address(env) {
             Some(a) => a,
             None => return false,
