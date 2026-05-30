@@ -953,6 +953,50 @@ impl OnboardingContract {
         );
     }
 
+    /// Reactivate a previously deactivated profile (Issue #115).
+    ///
+    /// Re-registers the user's original username and sets status back to Active.
+    ///
+    /// # Reverts if
+    /// - Profile is not deactivated
+    /// - Username has been claimed by another user since deactivation
+    pub fn reactivate_profile(env: Env, user: Address) -> UserProfile {
+        user.require_auth();
+
+        let profile_key = DataKey::UserProfile(user.clone());
+        let mut profile: UserProfile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
+        Self::extend_persistent(&env, &profile_key);
+
+        if profile.status != ProfileStatus::Deactivated {
+            env.panic_with_error(Error::ProfileDeactivated);
+        }
+
+        // Re-claim username — fail if another user took it while deactivated
+        let normalized = normalize_username(&env, &profile.username);
+        if env.storage().persistent().has(&DataKey::Username(normalized.clone())) {
+            env.panic_with_error(Error::UsernameTaken);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Username(normalized.clone()), &user);
+        Self::extend_persistent(&env, &DataKey::Username(normalized));
+
+        profile.status = ProfileStatus::Active;
+        env.storage().persistent().set(&profile_key, &profile);
+        Self::extend_persistent(&env, &profile_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "ProfileReactivated"), user.clone()),
+            (user, profile.role.clone()),
+        );
+
+        profile
+    }
+
     /// Verify user (admin only)
     ///
     /// # Arguments
