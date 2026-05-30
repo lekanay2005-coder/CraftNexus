@@ -793,10 +793,44 @@ impl OnboardingContract {
     }
 
     /// Extend the TTL of a persistent storage entry using standardized values.
+    ///
+    /// Soroban charges rent per ledger entry, so persistent state for an
+    /// active escrow / profile must have its TTL refreshed regularly to
+    /// avoid archival. Using a single helper keeps the threshold/extension
+    /// pair (`TTL_THRESHOLD`, `TTL_EXTENSION`) consistent across every
+    /// read/write path — drift between sites is the usual cause of
+    /// entries being archived earlier than callers expect.
+    ///
+    /// Callers do not need to check existence first: `extend_ttl` on a
+    /// missing key is a no-op, but it still costs CPU. For hot paths that
+    /// may legitimately call the helper with absent keys, use
+    /// [`Self::extend_persistent_if_present`] instead.
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
         env.storage()
             .persistent()
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    /// TTL-bump variant that first checks the entry exists.
+    ///
+    /// Useful inside enhanced business flows for active contracts where a
+    /// caller may attempt to refresh state for an entity that has already
+    /// been archived or was never created (e.g. a stale escrow reference
+    /// surfacing during a batched verification sweep). Skipping the
+    /// `extend_ttl` call when the key is absent saves the small per-call
+    /// CPU cost and avoids issuing a no-op against an archived entry.
+    fn extend_persistent_if_present<K>(env: &Env, key: &K) -> bool
+    where
+        K: soroban_sdk::IntoVal<Env, soroban_sdk::Val> + Clone,
+    {
+        if env.storage().persistent().has(key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+            true
+        } else {
+            false
+        }
     }
 
     /// Initialize the onboarding contract
@@ -1447,19 +1481,6 @@ impl OnboardingContract {
     /// [`UserMetrics`] with `total_escrow_count` and `total_volume` fields populated,
     /// or zeroed defaults when no record exists yet.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
-        let key = DataKey::UserMetrics(address.clone());
-        let metrics = env
-            .storage()
-            .persistent()
-            .get::<DataKey, UserMetrics>(&key)
-            .unwrap_or(UserMetrics {
-                total_escrow_count: 0,
-                total_volume: 0,
-            });
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(&env, &key);
-        }
-        metrics
         Self::read_user_metrics(&env, &address)
     }
 
@@ -1570,11 +1591,25 @@ impl OnboardingContract {
     }
 
     /// Trigger an auto-verification check for a user.
-    /// Anyone may call this; it is a no-op if thresholds are not yet met.
+    ///
+    /// The user being checked must sign the transaction. Even though
+    /// auto-verification only flips a positive flag when on-chain metrics
+    /// already qualify (so a malicious caller could not fabricate a
+    /// verification), gating on `address.require_auth()` keeps the
+    /// endpoint locked to the account owner — preventing third parties
+    /// from forcing a verification event onto a user who has not opted
+    /// in to the auto-flow, and giving auditors a clear authenticated
+    /// source for every `UserVerified` event emitted via this path.
     ///
     /// # Returns
     /// `true` if the user was just auto-verified, `false` if thresholds not met or already verified.
     pub fn auto_verify_user(env: Env, address: Address) -> bool {
+        // Lock the endpoint to the account being verified. The Soroban
+        // host short-circuits the rest of the call if the signature is
+        // missing or signed by a different address, so an unauthorized
+        // invocation can never reach the state mutation below.
+        address.require_auth();
+
         let config: OnboardingConfig = env
             .storage()
             .persistent()

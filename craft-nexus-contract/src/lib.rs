@@ -688,19 +688,44 @@ pub struct EscrowCreateParams {
 }
 
 /// Policy for handling fees when a dispute expires without arbitrator resolution.
-/// Determines whether the platform still collects a fee and from whom.
+///
+/// A dispute "expires" when the configured `max_dispute_duration` elapses
+/// without the arbitrator delivering a verdict (see [`PlatformConfig`]).
+/// At that point the escrow must still be unwound — but the platform fee
+/// is suddenly ambiguous: nobody won the dispute, so the usual "loser
+/// pays the fee" rule doesn't apply. This enum is the on-chain knob the
+/// admin uses to pick a policy at configuration time.
+///
+/// # Indexer / off-chain integration
+///
+/// Each variant is serialised as its `repr(u32)` discriminant on the
+/// wire, so off-chain indexers can match against `0..=3` without binding
+/// to the variant names. The discriminants are stable; reordering them
+/// would be a breaking change for existing escrows whose `PlatformConfig`
+/// has been persisted on-chain.
 #[contracttype]
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub enum ExpiredDisputeFeePolicy {
-    /// Refund buyer in full, platform collects no fee (default, buyer-friendly)
+    /// Refund buyer in full, platform collects no fee. The default,
+    /// buyer-friendly policy — the platform absorbs the cost of the
+    /// arbitrator timing out. Use when buyer goodwill matters more than
+    /// covering operational cost on stalled disputes.
     RefundFullNoPlatformFee = 0,
-    /// Refund buyer minus platform fee, platform collects fee from buyer
+    /// Refund buyer minus platform fee. The platform still earns its
+    /// fee, taken from the buyer's refunded amount. Symmetric to a
+    /// normal "buyer loses" resolution; use when the platform must
+    /// cover its costs regardless of dispute outcome.
     RefundMinusPlatformFee = 1,
-    /// Refund buyer in full, deduct platform fee from seller's locked amount
-    /// (seller loses fee even though they didn't receive payment)
+    /// Refund buyer in full, deduct platform fee from the seller's
+    /// locked amount. The seller forfeits the fee even though they
+    /// never received payment — use when seller responsibility for
+    /// presenting evidence outweighs the cost of forfeiting on a
+    /// stalled arbitration.
     DeductFeeFromSeller = 2,
-    /// Split the platform fee: half from buyer's refund, half from seller
+    /// Split the platform fee: half deducted from the buyer's refund,
+    /// half from the seller's locked amount. The most "neutral" policy
+    /// — both sides share the cost of the arbitrator timing out.
     SplitFee = 3,
 }
 
@@ -1006,9 +1031,18 @@ impl CraftNexusContract {
     }
 
     /// Validates admin address to ensure it's not zero/default and is properly initialized (#240)
-    /// This prevents common configuration errors and hardens against corruption
+    /// This prevents common configuration errors and hardens against corruption.
+    ///
+    /// Storage-layout note: this validator sits on the hot path for any
+    /// admin-gated mutation. Checks are ordered cheapest-first so the
+    /// common case (a structurally valid candidate that differs from
+    /// the current contract address) returns without touching persistent
+    /// storage at all — a small but consistent gas saving across every
+    /// transfer / propose / accept_admin call.
     fn validate_admin_address(env: &Env, admin: &Address) -> Result<(), Error> {
-        // Ensure the address is not the default/zero address
+        // Ensure the address is not the contract's own address — a common
+        // misconfiguration that would lock the contract out of admin
+        // operations forever.
         let contract = env.current_contract_address();
         if admin == &contract {
             return Err(Error::InvalidAdminAddress);
