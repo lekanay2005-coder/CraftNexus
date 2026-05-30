@@ -735,6 +735,65 @@ pub struct PartialRefundProposal {
     pub proposed_at: u64,
 }
 
+/// User roles in the CraftNexus platform
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum UserRole {
+    None = 0,      // User has not onboarded
+    Buyer = 1,     // Can purchase items
+    Artisan = 2,   // Can sell items and create escrow
+    Admin = 3,     // Platform administrator
+    Moderator = 4, // Can help manage disputes
+}
+
+/// Profile status for users
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ProfileStatus {
+    Active = 0,
+    Deactivated = 1,
+}
+
+/// Onboarding status for users
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UserProfile {
+    pub version: u32,
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    /// Count of escrows where this user was on the winning side (#100)
+    pub successful_trades: u32,
+    /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
+    /// Status of the user profile - Issue #113
+    pub status: ProfileStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LegacyUserProfile {
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    /// Count of escrows where this user was on the winning side (#100)
+    pub successful_trades: u32,
+    /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
+}
+
 /// Minimal cross-contract interface for the OnboardingContract.
 /// Used by CraftNexusContract to update user reputation and activity metrics
 /// when escrow state changes (release, refund, resolve).
@@ -748,12 +807,18 @@ pub trait OnboardingInterface {
         volume_delta: i128,
         token_address: Address,
     );
+    fn deactivate_profile(env: Env, user: Address);
+    fn verify_user(env: Env, user: Address) -> UserProfile;
 }
+
 #[contract]
 pub struct CraftNexusContract;
 
-/// Alias for backward compatibility
+/// Alias and compatibility layers
 pub type EscrowContract = CraftNexusContract;
+pub const EscrowContract: CraftNexusContract = CraftNexusContract;
+pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
+pub type CreateEscrowParams = EscrowCreateParams;
 
 /// Guard to ensure reentry protection is cleared even if a panic or error occurs.
 /// This is essential to prevent contract locks from persisting across failed calls.
@@ -1683,8 +1748,7 @@ impl CraftNexusContract {
 
         let previous_admin = config.admin.clone();
         config.pending_admin = Some(new_admin.clone());
-        env.storage().persistent().set(&PLATFORM_FEE, &config);
-        Self::extend_persistent(&env, &PLATFORM_FEE);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         // Emit audit event for admin change proposal
         Self::emit_admin_changed(&env, previous_admin, new_admin, "admin_proposed");
@@ -2018,10 +2082,6 @@ impl CraftNexusContract {
             .set(&seller_count_key, &(seller_count + 1));
         Self::extend_persistent(&env, &seller_count_key);
 
-        // Track active escrows for both parties
-        Self::update_active_obligations(&env, &buyer, 1);
-        Self::update_active_obligations(&env, &seller, 1);
-
         // Transfer funds from buyer to contract
         let client = token::Client::new(&env, &token);
         client.transfer(&buyer, &env.current_contract_address(), &amount);
@@ -2210,6 +2270,7 @@ impl CraftNexusContract {
         limit: u32,
         reverse: bool,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
+        buyer.require_auth();
         let mut result = soroban_sdk::Vec::new(&env);
 
         // Try new indexed storage first
@@ -2282,6 +2343,7 @@ impl CraftNexusContract {
         limit: u32,
         reverse: bool,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
+        seller.require_auth();
         let mut result = soroban_sdk::Vec::new(&env);
 
         // Try new indexed storage first
@@ -3350,8 +3412,6 @@ impl CraftNexusContract {
         proof: MetadataRevealProof,
         authorized_address: Address,
     ) -> bool {
-        authorized_address.require_auth();
-
         let escrow = Self::get_escrow(env.clone(), order_id);
         let config = Self::get_platform_config_internal(&env);
 
@@ -3952,6 +4012,15 @@ impl CraftNexusContract {
     /// # Errors
     /// - BatchLimitExceeded if batch exceeds MAX_BATCH_SIZE
     /// - Any validation error from individual escrows
+    pub fn create_escrows_batch(
+        env: Env,
+        params: soroban_sdk::Vec<EscrowCreateParams>,
+    ) -> Result<soroban_sdk::Vec<u64>, Error> {
+        let batch_id = env.storage().instance().get(&Symbol::new(&env, "next_batch_id")).unwrap_or(1u64);
+        env.storage().instance().set(&Symbol::new(&env, "next_batch_id"), &(batch_id + 1));
+        Self::create_batch_escrow(env, batch_id, params)
+    }
+
     pub fn create_batch_escrow(
         env: Env,
         batch_id: u64,
@@ -4515,14 +4584,27 @@ impl CraftNexusContract {
         let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
         let existing_cooldown: u64 = env.storage().persistent().get(&cooldown_key).unwrap_or(0);
         
-        if existing_cooldown == 0 {
+        let cooldown_end = if existing_cooldown == 0 {
             // No existing cooldown, initialize new one
             let config = Self::get_platform_config_internal(&env);
-            let cooldown_end = env.ledger().timestamp() + config.stake_cooldown as u64;
-            env.storage().persistent().set(&cooldown_key, &cooldown_end);
+            let end = env.ledger().timestamp() + config.stake_cooldown as u64;
+            env.storage().persistent().set(&cooldown_key, &end);
             Self::extend_persistent(&env, &cooldown_key);
-        }
-        // If cooldown already exists, do NOT reset it - prevents gaming the system
+            end
+        } else {
+            existing_cooldown
+        };
+
+        // Push deposit entry to queue
+        let queue_key = DataKey::ArtisanStakeQueue(artisan.clone());
+        let mut queue: soroban_sdk::Vec<StakeDeposit> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        queue.push_back(StakeDeposit { amount, cooldown_end });
+        env.storage().persistent().set(&queue_key, &queue);
+        Self::extend_persistent(&env, &queue_key);
     }
 
     /// Unstake previously staked tokens after the cooldown period has elapsed.

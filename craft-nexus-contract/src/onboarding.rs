@@ -49,64 +49,7 @@ pub enum DataKey {
     LastUsernameChange(Address),
 }
 
-/// User roles in the CraftNexus platform
-#[contracttype]
-#[derive(Copy, Clone, Eq, PartialEq)]
-#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
-pub enum UserRole {
-    None = 0,      // User has not onboarded
-    Buyer = 1,     // Can purchase items
-    Artisan = 2,   // Can sell items and create escrow
-    Admin = 3,     // Platform administrator
-    Moderator = 4, // Can help manage disputes
-}
-
-/// Profile status for users
-#[contracttype]
-#[derive(Copy, Clone, Eq, PartialEq)]
-#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
-pub enum ProfileStatus {
-    Active = 0,
-    Deactivated = 1,
-}
-
-/// Onboarding status for users
-#[contracttype]
-#[derive(Clone, Eq, PartialEq)]
-#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
-pub struct UserProfile {
-    pub version: u32,
-    pub address: Address,
-    pub role: UserRole,
-    pub username: String,
-    pub registered_at: u64,
-    pub is_verified: bool,
-    /// Count of escrows where this user was on the winning side (#100)
-    pub successful_trades: u32,
-    /// Count of escrows that ended in a dispute against this user (#100)
-    pub disputed_trades: u32,
-    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
-    pub portfolio_cid: Option<String>,
-    /// Status of the user profile - Issue #113
-    pub status: ProfileStatus,
-}
-
-#[contracttype]
-#[derive(Clone, Eq, PartialEq)]
-#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
-struct LegacyUserProfile {
-    pub address: Address,
-    pub role: UserRole,
-    pub username: String,
-    pub registered_at: u64,
-    pub is_verified: bool,
-    /// Count of escrows where this user was on the winning side (#100)
-    pub successful_trades: u32,
-    /// Count of escrows that ended in a dispute against this user (#100)
-    pub disputed_trades: u32,
-    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
-    pub portfolio_cid: Option<String>,
-}
+use crate::{UserProfile, UserRole, ProfileStatus, LegacyUserProfile};
 
 /// Activity metrics used to determine eligibility for auto-verification (#63)
 #[contracttype]

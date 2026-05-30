@@ -1,7 +1,8 @@
 extern crate alloc;
 
 use super::*;
-use crate::onboarding::{OnboardingContract, OnboardingContractClient, ProfileStatus, UserRole};
+use crate::onboarding::{OnboardingContract, OnboardingContractClient};
+use crate::{ProfileStatus, UserRole};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token, Address, Env, String,

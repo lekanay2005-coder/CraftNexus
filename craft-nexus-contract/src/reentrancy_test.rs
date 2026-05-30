@@ -2,13 +2,15 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger}, token, Address, Env, String, Symbol,
+    testutils::{Address as _, Ledger},
+    token, Address, Env, String, Symbol,
 };
 
 #[test]
-fn test_release_funds_cei_pattern() {
+fn test_release_cei_pattern() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -24,25 +26,20 @@ fn test_release_funds_cei_pattern() {
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
     // Initialize contract
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     // Mint tokens to buyer
     token_client.mint(&buyer, &10000);
 
     // Create escrow
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
-    let order_id = client.create_escrow_with_metadata(
+    let order_id = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id,
+        &Some(86400),
     );
 
     // Get escrow before release
@@ -50,7 +47,7 @@ fn test_release_funds_cei_pattern() {
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id))
                 .unwrap()
         });
     assert_eq!(escrow_before.status, EscrowStatus::Active);
@@ -63,7 +60,7 @@ fn test_release_funds_cei_pattern() {
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id))
                 .unwrap()
         });
     assert_eq!(escrow_after.status, EscrowStatus::Released);
@@ -73,6 +70,7 @@ fn test_release_funds_cei_pattern() {
 fn test_refund_cei_pattern() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -87,34 +85,29 @@ fn test_refund_cei_pattern() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &10000);
 
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
-    let order_id = client.create_escrow_with_metadata(
+    let order_id = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id,
+        &Some(86400),
     );
 
     // Refund
-    client.refund(&order_id);
+    client.refund(&(order_id as u64));
 
     // Verify state was updated before transfer
     let escrow: Escrow = env
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id))
                 .unwrap()
         });
     assert_eq!(escrow.status, EscrowStatus::Refunded);
@@ -124,6 +117,7 @@ fn test_refund_cei_pattern() {
 fn test_resolve_dispute_cei_pattern() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -139,38 +133,32 @@ fn test_resolve_dispute_cei_pattern() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &onboarding_contract);
-    client.add_arbitrator(&arbitrator);
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &10000);
 
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
-    let order_id = client.create_escrow_with_metadata(
+    let order_id = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id,
+        &Some(86400),
     );
 
     // Raise dispute
-    client.raise_dispute(&order_id, &String::from_str(&env, "Issue"));
+    client.dispute_escrow(&order_id, &String::from_str(&env, "Issue"), &buyer);
 
     // Resolve dispute - 50/50 split
-    client.resolve_dispute(&order_id, &2500, &arbitrator);
+    client.resolve_dispute(&order_id, &Resolution::ReleaseToSeller, &arbitrator);
 
     // Verify state was updated before transfers
     let escrow: Escrow = env
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id))
                 .unwrap()
         });
     assert_eq!(escrow.status, EscrowStatus::Resolved);
@@ -180,6 +168,7 @@ fn test_resolve_dispute_cei_pattern() {
 fn test_resolve_expired_dispute_cei_pattern() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -194,31 +183,26 @@ fn test_resolve_expired_dispute_cei_pattern() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &10000);
 
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
-    let order_id = client.create_escrow_with_metadata(
+    let order_id = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id,
+        &Some(86400),
     );
 
     // Raise dispute
-    client.raise_dispute(&order_id, &String::from_str(&env, "Issue"));
+    client.dispute_escrow(&order_id, &String::from_str(&env, "Issue"), &buyer);
 
     // Fast forward past dispute expiration (7 days)
     env.ledger().with_mut(|li| {
-        li.timestamp = li.timestamp + (7 * 24 * 60 * 60) + 1;
+        li.timestamp = li.timestamp + (30 * 24 * 60 * 60) + 1;
     });
 
     // Resolve expired dispute
@@ -229,7 +213,7 @@ fn test_resolve_expired_dispute_cei_pattern() {
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id))
                 .unwrap()
         });
     assert_eq!(escrow.status, EscrowStatus::Resolved);
@@ -239,6 +223,7 @@ fn test_resolve_expired_dispute_cei_pattern() {
 fn test_accept_partial_refund_cei_pattern() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -253,30 +238,25 @@ fn test_accept_partial_refund_cei_pattern() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &10000);
 
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
-    let order_id = client.create_escrow_with_metadata(
+    let order_id = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id,
+        &Some(86400),
     );
 
     // Raise dispute
-    client.raise_dispute(&order_id, &String::from_str(&env, "Issue"));
+    client.dispute_escrow(&order_id, &String::from_str(&env, "Issue"), &buyer);
 
     // Buyer proposes partial refund
-    client.propose_partial_refund(&order_id, &3000);
+    client.propose_partial_refund(&order_id, &3000, &buyer);
 
     // Seller accepts
     let _ = client.try_accept_partial_refund(&order_id);
@@ -286,7 +266,7 @@ fn test_accept_partial_refund_cei_pattern() {
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id))
                 .unwrap()
         });
     assert_eq!(escrow.status, EscrowStatus::Resolved);
@@ -296,6 +276,7 @@ fn test_accept_partial_refund_cei_pattern() {
 fn test_cancel_recurring_escrow_cei_pattern() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -310,12 +291,12 @@ fn test_cancel_recurring_escrow_cei_pattern() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &20000);
 
     // Create recurring escrow
-    let id = client.create_recurring_escrow(
+    let escrow_obj = client.create_recurring_escrow(
         &buyer,
         &artisan,
         &token.address(),
@@ -323,6 +304,7 @@ fn test_cancel_recurring_escrow_cei_pattern() {
         &1000,
         &86400,
     );
+    let id = escrow_obj.id;
 
     // Cancel recurring escrow
     client.cancel_recurring_escrow(&id);
@@ -342,6 +324,7 @@ fn test_cancel_recurring_escrow_cei_pattern() {
 fn test_auto_release_cei_pattern() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -356,23 +339,18 @@ fn test_auto_release_cei_pattern() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &10000);
 
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
-    let order_id = client.create_escrow_with_metadata(
+    let order_id = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id,
+        &Some(86400),
     );
 
     // Fast forward past release window
@@ -388,7 +366,7 @@ fn test_auto_release_cei_pattern() {
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id))
                 .unwrap()
         });
     assert_eq!(escrow.status, EscrowStatus::Released);
@@ -398,6 +376,7 @@ fn test_auto_release_cei_pattern() {
 fn test_state_consistency_during_concurrent_operations() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -412,56 +391,53 @@ fn test_state_consistency_during_concurrent_operations() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &30000);
 
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
     // Create multiple escrows
-    let order_id1 = client.create_escrow_with_metadata(
+    let order_id1 = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id1,
+        &Some(86400),
     );
 
-    let order_id2 = client.create_escrow_with_metadata(
+    let order_id2 = 2u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id2,
+        &Some(86400),
     );
 
-    let order_id3 = client.create_escrow_with_metadata(
+    let order_id3 = 3u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id3,
+        &Some(86400),
     );
 
     // Release first escrow
     client.release_funds(&order_id1);
 
     // Refund second escrow
-    client.refund(&order_id2);
+    client.refund(&(order_id2 as u64));
 
     // Verify all escrows have correct independent states
     let escrow1: Escrow = env
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id1))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id1))
                 .unwrap()
         });
     assert_eq!(escrow1.status, EscrowStatus::Released);
@@ -470,7 +446,7 @@ fn test_state_consistency_during_concurrent_operations() {
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id2))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id2))
                 .unwrap()
         });
     assert_eq!(escrow2.status, EscrowStatus::Refunded);
@@ -479,7 +455,7 @@ fn test_state_consistency_during_concurrent_operations() {
         .as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .get(&(Symbol::new(&env, "Escrow"), order_id3))
+                .get(&(Symbol::new(&env, "ESCROW"), order_id3))
                 .unwrap()
         });
     assert_eq!(escrow3.status, EscrowStatus::Active);
@@ -489,6 +465,7 @@ fn test_state_consistency_during_concurrent_operations() {
 fn test_active_obligations_updated_before_transfers() {
     let env = Env::default();
     env.mock_all_auths();
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let buyer = Address::generate(&env);
@@ -503,23 +480,18 @@ fn test_active_obligations_updated_before_transfers() {
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &onboarding_contract);
+    client.initialize(&platform_wallet, &admin, &Address::generate(&env), &500, &Some(onboarding_contract));
 
     token_client.mint(&buyer, &10000);
 
-    let metadata = Metadata {
-        title: String::from_str(&env, "Test"),
-        description: String::from_str(&env, "Test escrow"),
-        category: String::from_str(&env, "Digital"),
-    };
-
-    let order_id = client.create_escrow_with_metadata(
+    let order_id = 1u32;
+    client.create_escrow(
         &buyer,
         &seller,
         &token.address(),
         &5000,
-        &86400,
-        &metadata,
+        &order_id,
+        &Some(86400),
     );
 
     // Verify active obligations before release
