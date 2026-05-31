@@ -838,6 +838,51 @@ impl OnboardingContract {
         }
     }
 
+    /// Refresh the persistent TTL for a user's profile entry (#103).
+    ///
+    /// Active escrow contracts should call this during long-running escrow
+    /// lifecycles to prevent a participant's profile from being archived while
+    /// the escrow is still open. Only the registered escrow contract or the
+    /// platform admin may invoke this.
+    ///
+    /// # Returns
+    /// `true` if the profile existed and its TTL was refreshed; `false` if the
+    /// key was absent (profile archived or never created).
+    pub fn bump_user_profile_ttl(env: Env, user: Address) -> bool {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        match config.escrow_contract {
+            Some(ref escrow_addr) => escrow_addr.require_auth(),
+            None => config.platform_admin.require_auth(),
+        }
+        Self::extend_persistent_if_present(&env, &DataKey::UserProfile(user))
+    }
+
+    /// Refresh the persistent TTL for a user's activity metrics entry (#107).
+    ///
+    /// Complements `bump_user_profile_ttl` for escrow contracts that read or
+    /// write activity metrics during settlement. Only the registered escrow
+    /// contract or the platform admin may invoke this.
+    ///
+    /// # Returns
+    /// `true` if the metrics entry existed and its TTL was refreshed; `false`
+    /// if the key was absent.
+    pub fn bump_user_metrics_ttl(env: Env, user: Address) -> bool {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        match config.escrow_contract {
+            Some(ref escrow_addr) => escrow_addr.require_auth(),
+            None => config.platform_admin.require_auth(),
+        }
+        Self::extend_persistent_if_present(&env, &DataKey::UserMetrics(user))
+    }
+
     /// Initialize the onboarding contract
     ///
     /// # Arguments
@@ -1718,19 +1763,29 @@ impl OnboardingContract {
     /// Submit a manual verification request.
     /// The user's address is added to the verification queue for admin review.
     /// Calling this a second time before the request is processed is a no-op.
+    ///
+    /// Only Buyers and Artisans may invoke this endpoint. Admins and Moderators
+    /// are assigned their roles directly and do not use the verification queue.
     pub fn request_verification(env: Env, user: Address) {
         user.require_auth();
 
+        let profile_key = DataKey::UserProfile(user.clone());
+        let profile: UserProfile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
+        Self::extend_persistent(&env, &profile_key);
+
+        // Only Buyers and Artisans may request manual verification.
+        // Admins and Moderators are assigned their roles directly and bypass
+        // the verification queue.
         assert!(
-            env.storage()
-                .persistent()
-                .has(&DataKey::UserProfile(user.clone())),
-            "User not found"
+            profile.role == UserRole::Buyer || profile.role == UserRole::Artisan,
+            "Only Buyers and Artisans can request verification"
         );
 
-                Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
-
-if Self::is_verification_pending(&env, &user) {
+        if Self::is_verification_pending(&env, &user) {
             return;
         }
 
@@ -1813,7 +1868,34 @@ if Self::is_verification_pending(&env, &user) {
     }
 
     /// Get the full verification history for a user.
+    ///
+    /// Only the user themselves may read their own verification history.
     pub fn get_verification_history(env: Env, user: Address) -> Vec<VerificationEntry> {
+        user.require_auth();
+
+        Self::migrate_legacy_verification_history(&env, &user);
+
+        let count_key = DataKey::VerificationHistoryCount(user.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        if env.storage().persistent().has(&count_key) {
+            Self::extend_persistent(&env, &count_key);
+        }
+
+        let mut result = Vec::new(&env);
+        for index in 0..count {
+            let entry_key = DataKey::VerificationHistoryIndexed(user.clone(), index);
+            if let Some(compact) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, CompactVerificationEntry>(&entry_key)
+            {
+                result.push_back(VerificationEntry {
+                    timestamp: compact.timestamp,
+                    action: Self::verification_action_to_string(&env, compact.action),
+                    by: compact.by,
+                });
+                Self::extend_persistent(&env, &entry_key);
+            }
         let hist_key = DataKey::VerificationHistory(user.clone());
         let history = env
             .storage()
