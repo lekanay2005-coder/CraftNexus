@@ -254,6 +254,59 @@ pub trait EscrowInterface {
     fn has_active_escrows(env: Env, user: Address) -> bool;
 }
 
+/// Normalize a raw username string into its canonical on-chain form.
+///
+/// # Integration notes — issue #497 / component #96
+///
+/// ## Purpose
+/// All username storage keys and uniqueness checks operate on the
+/// *normalized* form produced by this function. Clients and indexers
+/// must apply the same normalization before constructing lookup keys or
+/// comparing usernames.
+///
+/// ## Normalization rules (applied in order)
+/// 1. ASCII alphanumeric characters (`a-z`, `A-Z`, `0-9`) are kept and
+///    lowercased.
+/// 2. Separator characters (space ` `, underscore `_`, hyphen `-`,
+///    period `.`) are collapsed to a single `_`. Consecutive separators
+///    produce exactly one `_`; leading and trailing separators are
+///    stripped.
+/// 3. A subset of Latin-extended and Cyrillic Unicode code points are
+///    transliterated to their closest ASCII equivalents via
+///    `map_username_bytes` (e.g. `ä` → `a`, `ß` → `ss`). Zero-width
+///    joiners and BOM sequences are silently dropped.
+/// 4. Any other byte sequence that is not matched by the above rules is
+///    replaced with a single `_` separator (subject to the collapsing
+///    rule in step 2).
+/// 5. The result is always lowercase ASCII.
+///
+/// ## Input constraints
+/// - Maximum input length: 256 bytes. Inputs exceeding this limit cause
+///   a panic; callers should validate length before invoking.
+/// - The function does **not** enforce minimum or maximum username
+///   length — that is the responsibility of the calling function
+///   (`onboard_user`, `change_username`) using the configured
+///   `min_username_length` / `max_username_length` values.
+///
+/// ## Storage side-effects
+/// - None. This is a pure transformation with no persistent reads or
+///   writes.
+///
+/// ## Off-chain consumers
+/// - Apply the same rules client-side before calling `is_username_taken`
+///   or `get_user_by_username` to avoid false negatives caused by
+///   un-normalized input.
+/// - The `UserOnboarded` and `UsernameChanged` events carry the
+///   already-normalized username; use those values verbatim for display
+///   and reverse lookups.
+///
+/// # Arguments
+/// * `env` - Soroban environment reference
+/// * `username` - Raw username string provided by the caller
+///
+/// # Returns
+/// Normalized username as a `soroban_sdk::String` (lowercase ASCII,
+/// separators collapsed, no leading/trailing `_`).
 fn normalize_username(env: &Env, username: &String) -> String {
     const MAX_INPUT_BYTES: usize = 256;
     const MAX_OUTPUT_BYTES: usize = 256;
@@ -873,6 +926,15 @@ impl OnboardingContract {
     /// the escrow is still open. Only the registered escrow contract or the
     /// platform admin may invoke this.
     ///
+    /// # Enhanced business flow — issue #496
+    ///
+    /// The Config entry TTL is now extended after auth passes. Previously the
+    /// Config read was not accompanied by a TTL bump, meaning a Config entry
+    /// close to expiry could be archived on the same ledger as a valid
+    /// `bump_user_profile_ttl` call. Extending Config here keeps the contract
+    /// configuration live for the full `TTL_EXTENSION` window whenever an
+    /// authorized escrow settlement touches this endpoint.
+    ///
     /// # Returns
     /// `true` if the profile existed and its TTL was refreshed; `false` if the
     /// key was absent (profile archived or never created).
@@ -886,6 +948,10 @@ impl OnboardingContract {
             Some(ref escrow_addr) => escrow_addr.require_auth(),
             None => config.platform_admin.require_auth(),
         }
+        // Issue #496 — extend Config TTL after auth so the configuration
+        // entry stays live for the full extension window on every authorized
+        // call, preventing silent archival during active escrow lifecycles.
+        Self::extend_persistent(&env, &DataKey::Config);
         Self::extend_persistent_if_present(&env, &DataKey::UserProfile(user))
     }
 
@@ -894,6 +960,11 @@ impl OnboardingContract {
     /// Complements `bump_user_profile_ttl` for escrow contracts that read or
     /// write activity metrics during settlement. Only the registered escrow
     /// contract or the platform admin may invoke this.
+    ///
+    /// # Enhanced business flow — issue #496
+    ///
+    /// Config TTL is extended after auth passes, matching the pattern applied
+    /// to `bump_user_profile_ttl` above.
     ///
     /// # Returns
     /// `true` if the metrics entry existed and its TTL was refreshed; `false`
@@ -908,6 +979,8 @@ impl OnboardingContract {
             Some(ref escrow_addr) => escrow_addr.require_auth(),
             None => config.platform_admin.require_auth(),
         }
+        // Issue #496 — extend Config TTL after auth, same as bump_user_profile_ttl.
+        Self::extend_persistent(&env, &DataKey::Config);
         Self::extend_persistent_if_present(&env, &DataKey::UserMetrics(user))
     }
 
@@ -1523,15 +1596,34 @@ impl OnboardingContract {
 
     /// Register the address of the deployed EscrowContract so it can update
     /// reputation and activity metrics via cross-contract calls (admin only).
+    ///
+    /// # Security — issue #498
+    ///
+    /// Auth check runs before any TTL extension or storage write, following
+    /// the check-effect-interactions pattern. A non-admin caller is rejected
+    /// by `require_auth` before the contract touches any persistent state,
+    /// preventing unauthorized callers from extending the Config TTL as a
+    /// side-effect of a failed invocation.
+    ///
+    /// # Arguments
+    /// * `contract_address` - Address of the deployed escrow contract
+    ///
+    /// # Reverts if
+    /// - Contract not initialized
+    /// - Caller is not platform admin
     pub fn set_escrow_contract(env: Env, contract_address: Address) {
+        // Issue #498 — load config read-only first, then require_auth,
+        // then extend TTL and write. This ordering ensures unauthorized
+        // callers cannot trigger any storage side-effects.
         let mut config: OnboardingConfig = env
             .storage()
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
         config.platform_admin.require_auth();
+
+        Self::extend_persistent(&env, &DataKey::Config);
         config.escrow_contract = Some(contract_address);
 
         env.storage().persistent().set(&DataKey::Config, &config);
@@ -1763,23 +1855,19 @@ impl OnboardingContract {
             env.storage().persistent().set(&profile_key, &profile);
             Self::extend_persistent(env, &profile_key);
 
-            // Append auto-verify entry to history
-            let hist_key = DataKey::VerificationHistory(address.clone());
-            let mut history: Vec<VerificationEntry> = env
-                .storage()
-                .persistent()
-                .get(&hist_key)
-                .unwrap_or(Vec::new(env));
-            history.push_back(VerificationEntry {
-                timestamp: env.ledger().timestamp(),
-                action: Symbol::new(env, "auto_verified"),
-                by: None,
-            });
-            if history.len() > 10 {
-                history.remove(0);
-            }
-            env.storage().persistent().set(&hist_key, &history);
-            Self::extend_persistent(env, &hist_key);
+            // Append auto-verify entry using compact indexed storage (#499).
+            // Replaces the legacy Vec<VerificationEntry> write that stored
+            // a full VerificationEntry (with a heap-allocated String action
+            // field) into a single growing Vec key. The compact path writes
+            // one small fixed-size entry per slot and caps history at
+            // MAX_VERIFICATION_HISTORY, keeping per-user storage footprint
+            // flat and reducing on-chain rent.
+            Self::append_verification_history(
+                env,
+                address,
+                VerificationActionCode::AutoVerified,
+                None,
+            );
 
             env.events()
                 .publish((Symbol::new(env, "UserVerified"),), address);
