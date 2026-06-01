@@ -1420,6 +1420,19 @@ impl OnboardingContract {
     ///
     /// # Security (#117)
     /// Requires platform admin authorization before any state transition.
+    /// Promote a user to Moderator role.
+    ///
+    /// # Authorization
+    ///
+    /// **SECURITY**: Only the platform admin can invoke this endpoint.
+    /// The caller's signature is verified via `require_auth()` before any mutation.
+    /// Unauthorized invocation results in immediate transaction rollback.
+    ///
+    /// # Arguments
+    /// * `user` - Address to promote to Moderator
+    ///
+    /// # Returns
+    /// Updated `UserProfile` with the new Moderator role assigned.
     pub fn set_moderator(env: Env, user: Address) -> UserProfile {
         let config: OnboardingConfig = env
             .storage()
@@ -1430,12 +1443,18 @@ impl OnboardingContract {
         Self::update_user_role(env, user, UserRole::Moderator)
     }
 
-    /// Update user role (admin only)
+    /// Update a user's platform role (admin-only endpoint).
+    ///
+    /// # Authorization
+    ///
+    /// **SECURITY**: Only the platform admin can invoke this endpoint.
+    /// The caller's signature is verified via `require_auth()` before any state mutation.
+    /// Unauthorized invocation with mismatched credentials results in immediate
+    /// transaction rollback with no state changes applied.
     ///
     /// Strictly enforces role transitions to prevent unauthorized state mutations.
-    /// Only the platform admin may invoke this endpoint. Validates that the new role
-    /// is a supported platform role (Buyer, Artisan, or Moderator); Admin and None
-    /// roles cannot be assigned via this method.
+    /// Validates that the new role is a supported platform role (Buyer, Artisan, or Moderator);
+    /// Admin and None roles cannot be assigned via this method to maintain security invariants.
     ///
     /// # Arguments
     /// * `user` - User's wallet address to update
@@ -1450,9 +1469,10 @@ impl OnboardingContract {
     /// - Extends TTL on config and profile entries to prevent archival during state transitions
     ///
     /// # Reverts if
-    /// - Caller is not the platform admin (unauthorized invocation)
+    /// - Caller is not the platform admin (authorization check fails)
     /// - User not found in persistent storage
     /// - New role is Admin or None (invalid assignment)
+    /// - Config not initialized
     pub fn update_user_role(env: Env, user: Address, new_role: UserRole) -> UserProfile {
         // Security: Get config to verify admin authorization
         let config: OnboardingConfig = env
@@ -1504,6 +1524,33 @@ impl OnboardingContract {
     /// - User has active escrows (traditional or recurring)
     /// - User is "admin"
     /// - Profile is already deactivated
+    /// Deactivate a user profile, preventing further platform activity.
+    ///
+    /// # Authorization
+    ///
+    /// **SECURITY**: Only the user whose profile is being deactivated can invoke this.
+    /// The caller's signature is verified via `require_auth()` before state mutation.
+    /// Unauthorized invocation results in immediate transaction rollback.
+    ///
+    /// # Arguments
+    /// * `user` - Address of the user whose profile to deactivate
+    ///
+    /// # Storage Side-Effects
+    /// - Marks user profile status as `Deactivated` in persistent storage
+    /// - Releases the username back to the pool (not reserved for the deactivated user)
+    /// - Emits `ProfileDeactivated` event with the user address
+    ///
+    /// # Preconditions
+    /// - User must be onboarded (have an existing profile)
+    /// - Profile must not already be deactivated
+    /// - User must not have active escrows (checked via escrow contract)
+    /// - Admin user profile cannot be deactivated
+    ///
+    /// # Reverts if
+    /// - Caller is not the user being deactivated (authorization failure)
+    /// - Profile already deactivated
+    /// - Active escrows exist for this user
+    /// - User is the admin
     pub fn deactivate_profile(env: Env, user: Address) {
         user.require_auth();
         let mut profile = Self::get_user_profile(&env, user.clone());
@@ -1563,6 +1610,36 @@ impl OnboardingContract {
     /// # Reverts if
     /// - Profile is not deactivated
     /// - Username has been claimed by another user since deactivation
+    /// Re-activate a previously deactivated user profile.
+    ///
+    /// # Authorization
+    ///
+    /// **SECURITY**: Only the user whose profile is being reactivated can invoke this.
+    /// The caller's signature is verified via `require_auth()` before state mutation.
+    /// Unauthorized invocation results in immediate transaction rollback.
+    ///
+    /// # Arguments
+    /// * `user` - Address of the deactivated user to reactivate
+    ///
+    /// # Returns
+    /// Updated `UserProfile` with status changed back to `Active`.
+    ///
+    /// # Storage Side-Effects
+    /// - Marks user profile status as `Active` in persistent storage
+    /// - Re-claims the user's reserved username in persistent storage
+    /// - Emits `ProfileReactivated` event with user address and role
+    /// - Extends TTL on profile and username entries
+    ///
+    /// # Preconditions
+    /// - User must have been previously deactivated
+    /// - User's username must still be available (not taken by another user)
+    /// - Profile must exist and be in deactivated status
+    ///
+    /// # Reverts if
+    /// - Caller is not the user being reactivated (authorization failure)
+    /// - Profile not found in persistent storage
+    /// - Profile is not in Deactivated status
+    /// - Username has been taken by another user while deactivated
     pub fn reactivate_profile(env: Env, user: Address) -> UserProfile {
         user.require_auth();
 
@@ -1608,6 +1685,30 @@ impl OnboardingContract {
     /// # Reverts if
     /// - Caller is not admin
     /// - User not found
+    /// Mark a user as verified on the platform.
+    ///
+    /// # Authorization
+    ///
+    /// **SECURITY**: Only the platform admin can invoke this endpoint.
+    /// The caller's signature is verified via `require_auth()` before any state mutation.
+    /// Unauthorized invocation results in immediate transaction rollback with
+    /// `Error::Unauthorized`.
+    ///
+    /// # Arguments
+    /// * `user` - Address of the user to verify
+    ///
+    /// # Returns
+    /// Updated `UserProfile` with `is_verified` flag set to true.
+    ///
+    /// # Storage Side-Effects
+    /// - Writes updated `UserProfile` to persistent storage
+    /// - Emits `UserVerified` event containing the verified user address
+    /// - Extends TTL on config and profile entries
+    ///
+    /// # Reverts if
+    /// - Caller is not the platform admin (unauthorized)
+    /// - User not found in persistent storage
+    /// - Config not initialized
     pub fn verify_user(env: Env, user: Address) -> UserProfile {
         // Get config to verify admin
         let config: OnboardingConfig = env
