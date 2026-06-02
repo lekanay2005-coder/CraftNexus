@@ -1489,6 +1489,74 @@ fn test_has_active_contracts() {
 }
 
 #[test]
+fn test_update_active_contracts_tracks_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "tracked"), &UserRole::Buyer);
+
+    let escrow_id = env.register_contract(None, crate::CraftNexusContract);
+    let platform_wallet = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+    let escrow_client = crate::CraftNexusContractClient::new(&env, &escrow_id);
+    escrow_client.initialize(
+        &platform_wallet,
+        &admin,
+        &arbitrator,
+        &500,
+        &Some(client.address.clone()),
+    );
+    client.set_escrow_contract(&escrow_id);
+
+    client.update_active_contracts(&user, &1);
+    assert!(client.has_active_contracts(&user));
+
+    let auths = env.auths();
+    assert!(auths.iter().any(|(addr, _)| addr == &escrow_id));
+
+    client.update_active_contracts(&user, &-1);
+    assert!(!client.has_active_contracts(&user));
+}
+
+#[test]
+#[should_panic]
+fn test_update_active_contracts_underflow_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "underflow"), &UserRole::Buyer);
+
+    let escrow_id = env.register_contract(None, crate::CraftNexusContract);
+    client.set_escrow_contract(&escrow_id);
+
+    let _ = admin;
+    client.update_active_contracts(&user, &-1);
+}
+
+#[test]
+#[should_panic]
+fn test_deactivate_profile_rejects_active_contract_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "deact"), &UserRole::Buyer);
+
+    let escrow_id = env.register_contract(None, crate::CraftNexusContract);
+    client.set_escrow_contract(&escrow_id);
+
+    client.update_active_contracts(&user, &1);
+    client.deactivate_profile(&user);
+
+    let _ = admin;
+}
+
+#[test]
 #[should_panic]
 fn test_get_verification_queue_unauthorized() {
     let env = Env::default();

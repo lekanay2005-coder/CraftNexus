@@ -609,3 +609,16 @@ fn test_artisan_stake_queue_max_capacity() {
     // We can't use std::panic::catch_unwind in no_std, so we'll just verify the count
     // In a real scenario, this would panic with StakeQueueFull error
 }
+
+#[test]
+fn test_index_read_budget_smoke() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    client.create_escrow(&buyer, &seller, &token, &1000, &1, &Some(604800));
+
+    env.budget().reset_default();
+    let before = env.budget().cpu_instruction_count();
+    let _ = client.has_active_escrows(&buyer);
+    let after = env.budget().cpu_instruction_count();
+
+    assert!(before > after);
+}

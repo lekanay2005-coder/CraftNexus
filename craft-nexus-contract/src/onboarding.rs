@@ -59,6 +59,13 @@ pub enum DataKey {
     UsernameChangeFeeWallet,
     /// Timestamp of last username change per user - Issue #114
     LastUsernameChange(Address),
+    /// Count of currently-active contracts for a user, maintained by the
+    /// configured escrow contract (Issue #533).
+    ///
+    /// This key lets onboarding flows validate "active contract" constraints
+    /// (e.g. preventing deactivation) without needing a cross-contract call
+    /// back into the escrow contract on every check.
+    ActiveContractCount(Address),
 }
 
 /// User roles in the CraftNexus platform
@@ -247,6 +254,8 @@ pub enum Error {
     InvalidPortfolioCid = 13,
     /// Cooldown period not yet elapsed
     CooldownActive = 14,
+    /// Attempted to decrement active contract count below zero
+    ActiveContractUnderflow = 15,
 }
 
 #[soroban_sdk::contractclient(name = "EscrowClient")]
@@ -574,6 +583,14 @@ fn validate_ipfs_cid(cid: &String) -> bool {
 }
 
 #[contract]
+/// CraftNexus onboarding contract.
+///
+/// This contract owns the user onboarding registry (profiles + usernames) and
+/// exposes integration endpoints used by the escrow contract to:
+/// - Update reputation counters (`update_reputation`)
+/// - Update activity metrics (`update_user_metrics`)
+/// - Maintain the active-contract counter used for business rules
+///   (`update_active_contracts`)
 pub struct OnboardingContract;
 
 #[contractimpl]
@@ -1414,6 +1431,12 @@ impl OnboardingContract {
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
         Self::extend_persistent(&env, &DataKey::Config);
 
+        let local_key = DataKey::ActiveContractCount(user.clone());
+        if let Some(count) = env.storage().persistent().get::<_, u32>(&local_key) {
+            Self::extend_persistent(&env, &local_key);
+            return count > 0;
+        }
+
         if let Some(escrow_contract) = config.escrow_contract {
             let client = EscrowClient::new(&env, &escrow_contract);
             client.has_active_escrows(&user)
@@ -1636,6 +1659,14 @@ impl OnboardingContract {
         let normalized = normalize_username(&env, &profile.username);
         if normalized == String::from_str(&env, "admin") {
             env.panic_with_error(Error::Unauthorized);
+        }
+
+        let local_key = DataKey::ActiveContractCount(user.clone());
+        if let Some(count) = env.storage().persistent().get::<_, u32>(&local_key) {
+            Self::extend_persistent(&env, &local_key);
+            if count > 0 {
+                env.panic_with_error(Error::ActiveEscrowsExist);
+            }
         }
 
         // Check for active escrows via cross-contract call if available
@@ -2081,6 +2112,81 @@ impl OnboardingContract {
         if config.auto_verify_enabled {
             Self::try_auto_verify(&env, &address, &config, &metrics);
         }
+    }
+
+    /// Update a user's "active contracts" counter (called by the escrow contract).
+    ///
+    /// This endpoint provides a lightweight, upgrade-safe way for the escrow
+    /// contract to signal that a user has entered or exited an active escrow
+    /// lifecycle. The onboarding contract uses the counter to enforce business
+    /// rules such as "profiles with active escrows cannot be deactivated"
+    /// without making a cross-contract read on every check.
+    ///
+    /// # Authorization
+    /// - Requires auth from `OnboardingConfig::escrow_contract` when configured.
+    /// - Falls back to `platform_admin` auth when no escrow contract is registered.
+    ///
+    /// # Storage side-effects
+    /// - Reads and extends TTL on `DataKey::Config`.
+    /// - Reads/writes and extends TTL on `DataKey::ActiveContractCount(user)`.
+    /// - Extends TTL (if present) on `DataKey::UserProfile(user)` and
+    ///   `DataKey::UserMetrics(user)` so active users do not silently fall out of
+    ///   onboarding state due to key expiry between settlements.
+    ///
+    /// # Arguments
+    /// * `user` - User participating in the active contract lifecycle
+    /// * `delta` - Signed increment: `+1` when a contract becomes active, `-1`
+    ///   when it is closed. Other values are allowed but should be used with
+    ///   caution; underflows revert with `Error::ActiveContractUnderflow`.
+    ///
+    /// # Reverts if
+    /// - Contract not initialized
+    /// - Caller is not the registered escrow contract (or admin fallback)
+    /// - `delta` would underflow the active counter
+    pub fn update_active_contracts(env: Env, user: Address, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        match config.escrow_contract {
+            Some(ref escrow_addr) => escrow_addr.require_auth(),
+            None => config.platform_admin.require_auth(),
+        }
+
+        let key = DataKey::ActiveContractCount(user.clone());
+        let current = env.storage().persistent().get::<_, u32>(&key).unwrap_or(0u32);
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+        }
+
+        let next = if delta > 0 {
+            current.saturating_add(delta as u32)
+        } else {
+            let subtract = (-delta) as u32;
+            if subtract > current {
+                env.panic_with_error(Error::ActiveContractUnderflow);
+            }
+            current - subtract
+        };
+
+        if next == 0 {
+            if env.storage().persistent().has(&key) {
+                env.storage().persistent().remove(&key);
+            }
+        } else {
+            env.storage().persistent().set(&key, &next);
+            Self::extend_persistent(&env, &key);
+        }
+
+        Self::extend_persistent_if_present(&env, &DataKey::UserProfile(user.clone()));
+        Self::extend_persistent_if_present(&env, &DataKey::UserMetrics(user));
     }
 
     /// Internal helper: verify a user automatically if they meet the configured thresholds.
