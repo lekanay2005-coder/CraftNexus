@@ -119,6 +119,9 @@ const ADMIN: Symbol = symbol_short!("ADMIN");
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
+/// Lower TTL threshold used for hot index reads to reduce the cost of frequent
+/// TTL refresh calls (Issue #533).
+const READ_TTL_THRESHOLD: u32 = 1_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
 
@@ -850,7 +853,16 @@ pub struct LegacyUserProfile {
 /// when escrow state changes (release, refund, resolve).
 #[soroban_sdk::contractclient(name = "OnboardingClient")]
 pub trait OnboardingInterface {
+    /// Increment a user's reputation counters.
+    ///
+    /// Called by this escrow contract after a terminal escrow outcome where a
+    /// winner/loser can be determined (release/refund/dispute resolution).
+    /// The onboarding contract authenticates that the caller is the registered
+    /// escrow contract address.
     fn update_reputation(env: Env, address: Address, successful_delta: u32, disputed_delta: u32);
+    /// Increment a user's activity metrics (escrow count + volume).
+    ///
+    /// Used by onboarding to drive auto-verification and analytics counters.
     fn update_user_metrics(
         env: Env,
         address: Address,
@@ -858,12 +870,39 @@ pub trait OnboardingInterface {
         volume_delta: i128,
         token_address: Address,
     );
+    /// Mark a user profile as deactivated.
+    ///
+    /// Used by the escrow contract for administrative safety actions; the
+    /// onboarding contract enforces its own authorization rules.
     fn deactivate_profile(env: Env, user: Address);
+    /// Verify a user, returning the updated profile.
     fn verify_user(env: Env, user: Address) -> UserProfile;
+    /// Return true if the user currently has any active escrow obligations.
     fn has_active_contracts(env: Env, user: Address) -> bool;
+    /// Update onboarding's local active-contract counter for a user.
+    ///
+    /// `delta` should be `+1` when an escrow becomes active and `-1` when the
+    /// escrow closes. The onboarding contract rejects underflows.
+    fn update_active_contracts(env: Env, user: Address, delta: i32);
 }
 
 #[contract]
+/// CraftNexus escrow contract.
+///
+/// # Storage model
+/// - Escrows are stored under `(ESCROW, order_id)` as a single compact record.
+/// - Enumeration uses count + indexed keys (e.g. `EscrowCount` +
+///   `GlobalEscrowIdIndexed(i)`) to avoid unbounded `Vec` growth.
+///
+/// # TTL model
+/// - Persistent entries extend TTL on write via `extend_persistent`.
+/// - Hot index reads use `extend_persistent_read` with a lower threshold to
+///   reduce rent-refresh overhead while still preventing accidental expiry.
+///
+/// # Onboarding integration
+/// - The admin can register an onboarding contract address.
+/// - Cross-contract calls are wrapped in `try_invoke_contract` helpers so an
+///   onboarding failure never bricks escrow settlement.
 pub struct CraftNexusContract;
 
 /// Alias and compatibility layers
@@ -1394,22 +1433,32 @@ impl CraftNexusContract {
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
     }
 
+    fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
     /// Read a persistent `u32` and extend its TTL when the key exists (#515).
     fn get_persistent_u32(env: &Env, key: &DataKey) -> u32 {
-        let value = env.storage().persistent().get(key).unwrap_or(0u32);
-        if env.storage().persistent().has(key) {
-            Self::extend_persistent(env, key);
+        match env.storage().persistent().get(key) {
+            Some(value) => {
+                Self::extend_persistent(env, key);
+                value
+            }
+            None => 0u32,
         }
-        value
     }
 
     fn get_whitelist_count(env: &Env) -> u32 {
         let count_key = DataKey::WhitelistedTokenCount;
-        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
-        if env.storage().persistent().has(&count_key) {
-            Self::extend_persistent(env, &count_key);
+        match env.storage().persistent().get(&count_key) {
+            Some(count) => {
+                Self::extend_persistent(env, &count_key);
+                count
+            }
+            None => 0u32,
         }
-        count
     }
 
     fn set_whitelist_count(env: &Env, count: u32) {
@@ -1533,8 +1582,7 @@ impl CraftNexusContract {
     /// Check if a user has any active escrows or recurring escrows.
     pub fn has_active_escrows(env: Env, user: Address) -> bool {
         let key = DataKey::ActiveObligations(user);
-        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
-        count > 0
+        Self::get_persistent_u32(&env, &key) > 0
     }
 
     /// Emit a structured warning event when a cross-contract call to the
@@ -1613,6 +1661,29 @@ impl CraftNexusContract {
             token_address.clone(),
         )
             .into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding, &method, args) {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding);
+                false
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn safe_update_active_contracts(env: &Env, user: Address, delta: i32) -> bool {
+        if delta == 0 {
+            return true;
+        }
+
+        let onboarding = match Self::get_onboarding_address(env) {
+            Some(a) => a,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_active_contracts");
+        let args: Vec<Val> = (user.clone(), delta).into_val(env);
 
         match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding, &method, args) {
             Ok(Ok(())) => true,
@@ -1804,7 +1875,11 @@ impl CraftNexusContract {
         }
 
         let token_key = DataKey::WhitelistedTokenIndexed(token);
-        env.storage().persistent().has(&token_key)
+        let is_whitelisted = env.storage().persistent().has(&token_key);
+        if is_whitelisted {
+            Self::extend_persistent(&env, &token_key);
+        }
+        is_whitelisted
     }
 
     /// Internal helper: panics with TokenNotWhitelisted when enforcement is active
@@ -1833,8 +1908,8 @@ impl CraftNexusContract {
     /// Returns 0 if no tokens are whitelisted (enforcement disabled).
     /// This is more efficient than loading all tokens when only the count is needed.
     pub fn get_whitelisted_token_count(env: Env) -> u32 {
-        let count_key = DataKey::WhitelistedTokenCount;
-        env.storage().persistent().get(&count_key).unwrap_or(0)
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        Self::get_whitelist_count(&env)
     }
 
     /// Migrate legacy whitelist storage to individual key-value pairs.
@@ -2412,6 +2487,9 @@ impl CraftNexusContract {
             .set(&seller_count_key, &(seller_count + 1));
         Self::extend_persistent(&env, &seller_count_key);
 
+        Self::safe_update_active_contracts(&env, buyer.clone(), 1);
+        Self::safe_update_active_contracts(&env, seller.clone(), 1);
+
         // Transfer funds from buyer to contract
         let client = token::Client::new(&env, &token);
         client.transfer(&buyer, &env.current_contract_address(), &amount);
@@ -2531,6 +2609,9 @@ impl CraftNexusContract {
         Self::update_active_obligations(&env, &buyer, 1);
         Self::update_active_obligations(&env, &seller, 1);
 
+        Self::safe_update_active_contracts(&env, buyer.clone(), 1);
+        Self::safe_update_active_contracts(&env, seller.clone(), 1);
+
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
@@ -2607,6 +2688,9 @@ impl CraftNexusContract {
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.seller, -1);
 
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
+
         Self::exit_reentry_guard(&env);
         Ok(())
     }
@@ -2644,15 +2728,11 @@ impl CraftNexusContract {
                 let index_key = DataKey::BuyerEscrowIndexed(buyer.clone(), storage_index);
                 if let Some(escrow_id) = env.storage().persistent().get::<_, u64>(&index_key) {
                     result.push_back(escrow_id);
-                    env.storage()
-                        .persistent()
-                        .extend_ttl(&index_key, 1000, 518400);
+                    Self::extend_persistent_read(&env, &index_key);
                 }
             }
 
-            env.storage()
-                .persistent()
-                .extend_ttl(&count_key, 1000, 518400);
+            Self::extend_persistent_read(&env, &count_key);
             return Ok(result);
         }
 
@@ -2665,9 +2745,7 @@ impl CraftNexusContract {
             .unwrap_or(soroban_sdk::Vec::new(&env));
 
         if env.storage().persistent().has(&legacy_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&legacy_key, 1000, 518400);
+            Self::extend_persistent_read(&env, &legacy_key);
         }
 
         let start = page * limit;
@@ -2723,15 +2801,11 @@ impl CraftNexusContract {
                 let index_key = DataKey::SellerEscrowIndexed(seller.clone(), storage_index);
                 if let Some(escrow_id) = env.storage().persistent().get::<_, u64>(&index_key) {
                     result.push_back(escrow_id);
-                    env.storage()
-                        .persistent()
-                        .extend_ttl(&index_key, 1000, 518400);
+                    Self::extend_persistent_read(&env, &index_key);
                 }
             }
 
-            env.storage()
-                .persistent()
-                .extend_ttl(&count_key, 1000, 518400);
+            Self::extend_persistent_read(&env, &count_key);
             return Ok(result);
         }
 
@@ -2744,9 +2818,7 @@ impl CraftNexusContract {
             .unwrap_or(soroban_sdk::Vec::new(&env));
 
         if env.storage().persistent().has(&legacy_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&legacy_key, 1000, 518400);
+            Self::extend_persistent_read(&env, &legacy_key);
         }
 
         let start = page * limit;
@@ -3195,6 +3267,9 @@ impl CraftNexusContract {
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.seller, -1);
 
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
+
         // Transfer platform fee to platform wallet
         if fee_amount > 0 {
             Self::transfer_platform_fee(&env, &escrow.token, &config.platform_wallet, fee_amount);
@@ -3292,6 +3367,9 @@ impl CraftNexusContract {
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.seller, -1);
+
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
 
         // Transfer platform fee to platform wallet
         if fee_amount > 0 {
@@ -3676,6 +3754,9 @@ impl CraftNexusContract {
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.seller, -1);
 
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
+
         // Refund to buyer
         let client = token::Client::new(&env, &escrow.token);
         client.transfer(
@@ -3965,6 +4046,9 @@ impl CraftNexusContract {
         // Clean up any orphaned partial refund proposal
         let proposal_key = DataKey::PartialRefundProposal(order_id);
         env.storage().persistent().remove(&proposal_key);
+
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
 
         // Now perform token transfers (external calls)
         match resolution {
@@ -4640,9 +4724,7 @@ impl CraftNexusContract {
                 let escrow_opt: Option<Escrow> =
                     env.storage().persistent().get(&(ESCROW, order_id));
                 if escrow_opt.is_some() {
-                    env.storage()
-                        .persistent()
-                        .extend_ttl(&(ESCROW, order_id), 1000, 518400);
+                    Self::extend_persistent_read(&env, &(ESCROW, order_id));
                 }
 
                 if let Some(mut escrow) = escrow_opt {
@@ -4661,6 +4743,9 @@ impl CraftNexusContract {
                     // Decrement active counts
                     Self::update_active_obligations(&env, &escrow.buyer, -1);
                     Self::update_active_obligations(&env, &escrow.seller, -1);
+
+                    Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+                    Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
 
                     // Transfer platform fee to platform wallet
                     if fee_amount > 0 {
@@ -4860,6 +4945,9 @@ impl CraftNexusContract {
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.seller, -1);
+
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
 
         // Now perform token transfers (external calls)
         let token_client = token::Client::new(&env, &escrow.token);
@@ -5467,6 +5555,9 @@ impl CraftNexusContract {
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.seller, -1);
 
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
+
         // CEI Pattern: INTERACTIONS - External calls AFTER state updates
         let token_client = token::Client::new(&env, &escrow.token);
 
@@ -5644,6 +5735,9 @@ impl CraftNexusContract {
         Self::update_active_obligations(&env, &buyer, 1);
         Self::update_active_obligations(&env, &artisan, 1);
 
+        Self::safe_update_active_contracts(&env, buyer.clone(), 1);
+        Self::safe_update_active_contracts(&env, artisan.clone(), 1);
+
         // Lock funds upfront
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&buyer, &env.current_contract_address(), &total_amount);
@@ -5721,7 +5815,8 @@ impl CraftNexusContract {
         escrow.current_cycle += 1;
         escrow.last_release_time = now;
 
-        if escrow.current_cycle == escrow.duration as u64 {
+        let became_inactive = escrow.current_cycle == escrow.duration as u64;
+        if became_inactive {
             escrow.is_active = false;
             // Decrement active recurring counts
             Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -5730,6 +5825,11 @@ impl CraftNexusContract {
 
         env.storage().persistent().set(&key, &escrow);
         Self::extend_persistent(&env, &key);
+
+        if became_inactive {
+            Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+            Self::safe_update_active_contracts(&env, escrow.artisan.clone(), -1);
+        }
 
         env.events().publish(
             (Symbol::new(&env, "recurring_escrow"), id),
@@ -5800,6 +5900,9 @@ impl CraftNexusContract {
         // Decrement active recurring counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.artisan, -1);
+
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.artisan.clone(), -1);
 
         // CEI Pattern: INTERACTIONS - External calls AFTER state updates
         if remaining > 0 {
