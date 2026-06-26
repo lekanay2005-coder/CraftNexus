@@ -269,7 +269,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -393,7 +393,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "buyer_jane"
+                        "symbol": "buyer_jane"
                       }
                     },
                     {
@@ -905,7 +905,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "buyer_jane"
+                    "symbol": "buyer_jane"
                   }
                 },
                 {
@@ -971,7 +971,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Only artisans can update portfolio' from contract function 'Symbol(obj#173)'"
+                  "string": "caught panic 'Only artisans can update portfolio' from contract function 'Symbol(obj#175)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"

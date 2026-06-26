@@ -273,7 +273,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -397,7 +397,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "craft_user"
+                        "symbol": "craft_user"
                       }
                     },
                     {
@@ -958,7 +958,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "craft_user"
+                    "symbol": "craft_user"
                   }
                 },
                 {

@@ -310,7 +310,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -434,7 +434,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "artisan_bob"
+                        "symbol": "artisan_bob"
                       }
                     },
                     {
@@ -1012,7 +1012,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "artisan_bob"
+                    "symbol": "artisan_bob"
                   }
                 },
                 {
@@ -1129,7 +1129,7 @@
                     "symbol": "portfolio_cid"
                   },
                   "val": {
-                    "string": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+                    "bytes": "516d597741504a7a7635435a736e4136323573335866326e656d7459675070486457457a37396f6a576e50626447"
                   }
                 },
                 {
@@ -1169,7 +1169,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "artisan_bob"
+                    "symbol": "artisan_bob"
                   }
                 },
                 {
@@ -1322,7 +1322,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "artisan_bob"
+                    "symbol": "artisan_bob"
                   }
                 },
                 {

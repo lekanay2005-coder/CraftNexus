@@ -305,7 +305,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -429,7 +429,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "moderator_user"
+                        "symbol": "moderator_user"
                       }
                     },
                     {
@@ -1007,7 +1007,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "moderator_user"
+                    "symbol": "moderator_user"
                   }
                 },
                 {
@@ -1165,7 +1165,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "moderator_user"
+                    "symbol": "moderator_user"
                   }
                 },
                 {

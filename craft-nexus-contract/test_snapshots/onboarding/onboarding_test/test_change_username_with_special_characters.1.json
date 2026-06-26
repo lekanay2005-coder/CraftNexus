@@ -335,7 +335,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -459,7 +459,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "new_user_name_123"
+                        "symbol": "new_user_name_123"
                       }
                     },
                     {
@@ -613,7 +613,7 @@
                             "symbol": "action"
                           },
                           "val": {
-                            "string": "username_revoked"
+                            "symbol": "username_revoked"
                           }
                         },
                         {
@@ -1078,7 +1078,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "original"
+                    "symbol": "original"
                   }
                 },
                 {
@@ -1233,7 +1233,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "new_user_name_123"
+                    "symbol": "new_user_name_123"
                   }
                 },
                 {

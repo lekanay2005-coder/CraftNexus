@@ -504,7 +504,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -628,7 +628,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "manualonly"
+                        "symbol": "manualonly"
                       }
                     },
                     {
@@ -1384,7 +1384,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "manualonly"
+                    "symbol": "manualonly"
                   }
                 },
                 {
@@ -1907,7 +1907,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "manualonly"
+                    "symbol": "manualonly"
                   }
                 },
                 {

@@ -269,7 +269,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -393,7 +393,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "craftmaster"
+                        "symbol": "craftmaster"
                       }
                     },
                     {
@@ -905,7 +905,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "craftmaster"
+                    "symbol": "craftmaster"
                   }
                 },
                 {
@@ -974,7 +974,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#175)'"
+                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#177)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"

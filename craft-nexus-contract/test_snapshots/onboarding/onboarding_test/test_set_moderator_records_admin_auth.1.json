@@ -305,7 +305,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -429,7 +429,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "promotee"
+                        "symbol": "promotee"
                       }
                     },
                     {
@@ -1007,7 +1007,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "promotee"
+                    "symbol": "promotee"
                   }
                 },
                 {
@@ -1165,7 +1165,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "promotee"
+                    "symbol": "promotee"
                   }
                 },
                 {
@@ -1293,7 +1293,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "promotee"
+                    "symbol": "promotee"
                   }
                 },
                 {

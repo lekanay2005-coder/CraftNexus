@@ -470,7 +470,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -594,7 +594,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "arty6"
+                        "symbol": "arty6"
                       }
                     },
                     {
@@ -748,7 +748,7 @@
                             "symbol": "action"
                           },
                           "val": {
-                            "string": "auto_verified"
+                            "symbol": "auto_verified"
                           }
                         },
                         {
@@ -1356,7 +1356,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "arty6"
+                    "symbol": "arty6"
                   }
                 },
                 {

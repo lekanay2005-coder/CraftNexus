@@ -306,7 +306,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -430,7 +430,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "pending_user"
+                        "symbol": "pending_user"
                       }
                     },
                     {
@@ -1258,7 +1258,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "pending_user"
+                    "symbol": "pending_user"
                   }
                 },
                 {

@@ -336,7 +336,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -460,7 +460,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "queued1"
+                        "symbol": "queued1"
                       }
                     },
                     {
@@ -1393,7 +1393,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "queued1"
+                    "symbol": "queued1"
                   }
                 },
                 {

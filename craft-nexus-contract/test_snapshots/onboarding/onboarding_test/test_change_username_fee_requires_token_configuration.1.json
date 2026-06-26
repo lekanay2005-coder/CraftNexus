@@ -291,7 +291,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -415,7 +415,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "needs_fee"
+                        "symbol": "needs_fee"
                       }
                     },
                     {
@@ -1002,7 +1002,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "needs_fee"
+                    "symbol": "needs_fee"
                   }
                 },
                 {

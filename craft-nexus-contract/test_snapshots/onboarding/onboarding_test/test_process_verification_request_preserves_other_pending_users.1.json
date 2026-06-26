@@ -368,7 +368,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -492,7 +492,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "queued4"
+                        "symbol": "queued4"
                       }
                     },
                     {
@@ -616,7 +616,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "queued5"
+                        "symbol": "queued5"
                       }
                     },
                     {
@@ -1824,7 +1824,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "queued4"
+                    "symbol": "queued4"
                   }
                 },
                 {
@@ -2007,7 +2007,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "queued5"
+                    "symbol": "queued5"
                   }
                 },
                 {

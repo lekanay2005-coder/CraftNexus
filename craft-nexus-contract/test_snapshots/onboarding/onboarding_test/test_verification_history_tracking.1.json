@@ -328,7 +328,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -452,7 +452,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "hist1"
+                        "symbol": "hist1"
                       }
                     },
                     {
@@ -1338,7 +1338,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "hist1"
+                    "symbol": "hist1"
                   }
                 },
                 {
@@ -1527,7 +1527,7 @@
                         "symbol": "action"
                       },
                       "val": {
-                        "string": "requested"
+                        "symbol": "requested"
                       }
                     },
                     {
@@ -1555,7 +1555,7 @@
                         "symbol": "action"
                       },
                       "val": {
-                        "string": "approved"
+                        "symbol": "approved"
                       }
                     },
                     {

@@ -296,7 +296,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -420,7 +420,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "buyer_user"
+                        "symbol": "buyer_user"
                       }
                     },
                     {
@@ -544,7 +544,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "artisan_user"
+                        "symbol": "artisan_user"
                       }
                     },
                     {
@@ -1134,7 +1134,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "buyer_user"
+                    "symbol": "buyer_user"
                   }
                 },
                 {
@@ -1317,7 +1317,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "artisan_user"
+                    "symbol": "artisan_user"
                   }
                 },
                 {

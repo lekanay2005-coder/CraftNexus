@@ -307,7 +307,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -431,7 +431,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "arty4"
+                        "symbol": "arty4"
                       }
                     },
                     {
@@ -1009,7 +1009,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "arty4"
+                    "symbol": "arty4"
                   }
                 },
                 {
@@ -1157,7 +1157,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "arty4"
+                    "symbol": "arty4"
                   }
                 },
                 {
