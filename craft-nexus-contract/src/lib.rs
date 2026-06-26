@@ -494,6 +494,24 @@ pub struct ReputationUpdateEvent {
     pub timestamp: u64,
 }
 
+/// Tagged union used to carry a single configuration value inside
+/// [`ConfigUpdatedEvent`].
+///
+/// Soroban events must be self-describing for off-chain indexers, but
+/// `PlatformConfig` fields are heterogeneous (counts, monetary amounts,
+/// addresses, and free-form strings). Rather than emit a separate event type
+/// per field — which would bloat the contract's event ABI — every admin
+/// configuration change is normalized into one of these four variants. Indexers
+/// match on the variant tag to recover the underlying Rust type without any
+/// loss of precision (in particular, `I128` monetary values are never
+/// stringified on-chain; see the note on [`EscrowEvent::amount`]).
+///
+/// # Variant mapping
+///
+/// * `U32`     — bounded counters and basis-point fees (e.g. `platform_fee_bps`).
+/// * `I128`    — monetary thresholds such as `min_escrow_amount`.
+/// * `Address` — role and token addresses (e.g. `fee_collector`).
+/// * `String`  — human-readable identifiers that have no compact encoding.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -504,6 +522,33 @@ pub enum ConfigValue {
     String(String),
 }
 
+/// Emitted whenever an admin mutates a single field of the on-chain
+/// `PlatformConfig`.
+///
+/// # Topics
+///
+/// Published under `(symbol "config_updated", symbol field_name)` so indexers
+/// can subscribe to changes of a specific field cheaply. The `field_name` topic
+/// mirrors the `field_name` payload member.
+///
+/// # Preconditions
+///
+/// * The caller must be the current platform admin; the emitting function
+///   asserts `admin.require_auth()` before the storage write, so this event is
+///   only ever observed for an authorized change.
+///
+/// # Storage side-effects
+///
+/// * The corresponding `PlatformConfig` field has already been persisted by the
+///   time this event fires. The event is emitted *after* the storage write,
+///   in keeping with the check-effects-interactions ordering used throughout
+///   the contract.
+///
+/// # Payload
+///
+/// * `field_name` — symbolic name of the mutated field.
+/// * `old_value`  — value held immediately before the write.
+/// * `new_value`  — value persisted by this update.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -513,6 +558,32 @@ pub struct ConfigUpdatedEvent {
     pub new_value: ConfigValue,
 }
 
+/// Emitted when an artisan's negotiated platform-fee tier is set or changed.
+///
+/// Per-artisan fee tiers let the platform reward high-reputation sellers with a
+/// reduced `fee_bps` (basis points, where `10_000` == 100%). The persisted tier
+/// overrides the global `platform_fee_bps` for that artisan's future escrows.
+///
+/// # Topics
+///
+/// Published under `(symbol "artisan_fee_tier_updated", address artisan)` so a
+/// client can stream the fee history of a single artisan.
+///
+/// # Preconditions
+///
+/// * The caller must be the platform admin (`require_auth`).
+/// * `fee_bps` is validated against `MAX_PLATFORM_FEE_BPS`; an out-of-range
+///   value aborts with [`Error::InvalidFee`] and no event is emitted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's fee-tier ledger entry is written (and its TTL extended)
+///   before this event fires.
+///
+/// # Payload
+///
+/// * `artisan` — address whose fee tier was updated.
+/// * `fee_bps` — the new fee in basis points applied to future escrows.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -521,6 +592,32 @@ pub struct ArtisanFeeTierUpdatedEvent {
     pub fee_bps: u32,
 }
 
+/// Emitted when an artisan stakes collateral tokens into the platform.
+///
+/// Staking is a precondition for accepting high-value escrows; the staked
+/// balance backs the artisan's dispute exposure. Token movement obeys the
+/// check-effects-interactions pattern: the artisan's persistent stake balance
+/// is increased and committed *before* the external `token.transfer` callback,
+/// so a malicious token contract cannot re-enter and observe a stale balance.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_staked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()` — only the staker may stake on their own behalf.
+/// * `amount` must be positive and `token` whitelisted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is incremented and its TTL extended.
+///
+/// # Payload
+///
+/// * `artisan` — the staking address.
+/// * `token`   — the staked token's contract address.
+/// * `amount`  — raw token amount staked (never stringified on-chain).
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -530,6 +627,31 @@ pub struct TokensStakedEvent {
     pub amount: i128,
 }
 
+/// Emitted when an artisan withdraws previously staked collateral.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_unstaked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()`.
+/// * The stake cooldown must have elapsed, otherwise the call aborts with
+///   [`Error::StakeCooldownActive`] and no event is emitted.
+/// * The withdrawal token must match the original staking token
+///   ([`Error::StakeTokenMismatch`]).
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is decremented *before* the outbound
+///   `token.transfer`, preserving reentrancy safety (the transfer is the final
+///   interaction in the call path).
+///
+/// # Payload
+///
+/// * `artisan` — the withdrawing address.
+/// * `token`   — the unstaked token's contract address.
+/// * `amount`  — raw token amount returned to the artisan.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -539,6 +661,34 @@ pub struct TokensUnstakedEvent {
     pub amount: i128,
 }
 
+/// Emitted when an order's off-chain metadata is verified against its on-chain
+/// commitment.
+///
+/// The contract stores only a compact hash of an order's metadata (see
+/// [`EscrowMetadata`]); the full document lives off-chain (e.g. IPFS). When a
+/// verifier reveals the document and the contract confirms its hash matches the
+/// stored commitment, this event records the successful verification so
+/// indexers can mark the order's metadata as trusted.
+///
+/// # Topics
+///
+/// Published under `(symbol "metadata_verified", u64 order_id)`.
+///
+/// # Preconditions
+///
+/// * The stored commitment must exist and the revealed content must hash to it,
+///   otherwise the call aborts with [`Error::InvalidMetadataHash`].
+///
+/// # Storage side-effects
+///
+/// * None beyond TTL refresh of the order entry; verification is a read-and-
+///   compare operation that emits this audit event.
+///
+/// # Payload
+///
+/// * `order_id`  — the escrow/order whose metadata was verified.
+/// * `verifier`  — address that submitted the reveal proof.
+/// * `timestamp` — ledger timestamp at verification time.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
