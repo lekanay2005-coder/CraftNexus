@@ -1761,7 +1761,7 @@ impl OnboardingContract {
         has
     }
 
-/// Check if a user has completed onboarding.
+    /// Check if a user has completed onboarding.
     ///
     /// Returns `true` if a [`DataKey::UserProfile`] entry exists for `user`,
     /// regardless of profile status or version.
@@ -1797,7 +1797,6 @@ impl OnboardingContract {
         } else {
             false
         }
-    }
     }
 
     /// Get a user's role.
@@ -2206,7 +2205,7 @@ impl OnboardingContract {
         Self::get_user_role(env, user) == role
     }
 
-/// Check if a user is verified.
+    /// Check if a user is verified.
     ///
     /// Returns `false` for unknown addresses (no panic).
     ///
@@ -2245,7 +2244,6 @@ impl OnboardingContract {
         } else {
             false
         }
-    }
     }
 
     // -----------------------------------------------------------------------
