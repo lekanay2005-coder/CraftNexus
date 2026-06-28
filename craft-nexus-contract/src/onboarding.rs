@@ -9,8 +9,6 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, TryFromVal, Val, Vec,
 };
-use alloc::string::ToString;
-
 extern crate alloc;
 use alloc::string::ToString;
 
@@ -1605,8 +1603,12 @@ impl OnboardingContract {
     }
 
     /// Check if the user has any active escrows on the configured escrow contract.
+    ///
+    /// [FEATURE #51 / #452] The queried user must authorize this read.
     /// Returns false if no escrow contract is registered or if the user has no active escrows.
     pub fn has_active_contracts(env: Env, user: Address) -> bool {
+        user.require_auth();
+
         let config: OnboardingConfig = env
             .storage()
             .persistent()
@@ -2362,6 +2364,10 @@ impl OnboardingContract {
     /// [`UserMetrics`] with `total_escrow_count` and `total_volume` populated,
     /// or zeroed defaults when no escrow activity has been recorded.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
+        // [SECURITY] Endpoint #29: activity metrics are user-private; only the
+        // account owner may read them. Unauthorized access rolls back immediately.
+        address.require_auth();
+
         let metrics_key = DataKey::UserMetrics(address.clone());
         let metrics = env
             .storage()
@@ -3032,12 +3038,20 @@ impl OnboardingContract {
     /// # Returns
     /// Tuple `(successful_trades, disputed_trades)`.
     pub fn get_user_reputation(env: Env, address: Address) -> (u32, u32) {
+        // [SECURITY] Endpoint #45: reputation counters are user-private; only
+        // the account owner may read them. Unauthorized access rolls back immediately.
+        address.require_auth();
+
+        let profile_key = DataKey::UserProfile(address.clone());
         match env
             .storage()
             .persistent()
-            .get::<DataKey, UserProfile>(&DataKey::UserProfile(address.clone()))
+            .get::<DataKey, UserProfile>(&profile_key)
         {
-            Some(profile) => (profile.successful_trades, profile.disputed_trades),
+            Some(profile) => {
+                Self::extend_persistent(&env, &profile_key);
+                (profile.successful_trades, profile.disputed_trades)
+            }
             None => (0, 0),
         }
     }

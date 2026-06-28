@@ -1988,3 +1988,93 @@ fn test_get_verification_queue_returns_pending_users() {
     let admin_auth = auths.iter().find(|(addr, _)| addr == &admin);
     assert!(admin_auth.is_some(), "admin auth must be recorded for get_verification_queue");
 }
+
+// ── Issue #430: [SECURITY] Endpoint #29 – get_user_metrics ───────────────────
+
+/// Issue #430 — get_user_metrics must reject callers without user authorization.
+#[test]
+#[should_panic]
+fn test_get_user_metrics_unauthorized() {
+    let env = Env::default();
+
+    let contract_id = env.register_contract(None, OnboardingContract);
+    let client = OnboardingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let config = OnboardingConfig {
+        require_username: true,
+        min_username_length: 3,
+        max_username_length: 50,
+        platform_admin: admin.clone(),
+        auto_verify_enabled: true,
+        min_escrow_count_for_verify: 5,
+        min_volume_for_verify: 10_000_000_000,
+        escrow_contract: None,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Config, &config);
+    });
+
+    client.get_user_metrics(&user);
+}
+
+// ── Issue #446: [SECURITY] Endpoint #45 – get_user_reputation ──────────────────
+
+/// Issue #446 — get_user_reputation must reject callers without user authorization.
+#[test]
+#[should_panic]
+fn test_get_user_reputation_unauthorized() {
+    let env = Env::default();
+
+    let contract_id = env.register_contract(None, OnboardingContract);
+    let client = OnboardingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let config = OnboardingConfig {
+        require_username: true,
+        min_username_length: 3,
+        max_username_length: 50,
+        platform_admin: admin.clone(),
+        auto_verify_enabled: true,
+        min_escrow_count_for_verify: 5,
+        min_volume_for_verify: 10_000_000_000,
+        escrow_contract: None,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Config, &config);
+    });
+
+    client.get_user_reputation(&user);
+}
+
+// ── Issue #452: [FEATURE] Business flow #51 – active contract authorization ─
+
+/// Issue #452 — has_active_contracts must reject callers without user authorization.
+#[test]
+#[should_panic]
+fn test_has_active_contracts_unauthorized() {
+    let env = Env::default();
+
+    let contract_id = env.register_contract(None, OnboardingContract);
+    let client = OnboardingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let config = OnboardingConfig {
+        require_username: true,
+        min_username_length: 3,
+        max_username_length: 50,
+        platform_admin: admin.clone(),
+        auto_verify_enabled: true,
+        min_escrow_count_for_verify: 5,
+        min_volume_for_verify: 10_000_000_000,
+        escrow_contract: None,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Config, &config);
+    });
+
+    client.has_active_contracts(&user);
+}
