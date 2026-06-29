@@ -5486,6 +5486,18 @@ impl CraftNexusContract {
     pub fn unstake_tokens(env: Env, artisan: Address, token: Address) {
         artisan.require_auth();
 
+        // Validate the requested token matches the token recorded at stake time.
+        // Rejects attempts to withdraw in a cheaper/different asset (#421).
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let current_stake: ArtisanStakeData = env
+            .storage()
+            .persistent()
+            .get(&stake_key)
+            .unwrap_or_else(|| env.panic_with_error(crate::Error::InsufficientStake));
+        if current_stake.token != token {
+            env.panic_with_error(crate::Error::StakeTokenMismatch);
+        }
+
         // Use bounded indexed queue: only matured deposits can be unstaked.
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -5533,22 +5545,18 @@ impl CraftNexusContract {
         }
 
         // Update stake metadata
-        let stake_key = DataKey::ArtisanStake(artisan.clone());
-        if let Some(current_stake) = env.storage().persistent().get::<DataKey, ArtisanStakeData>(&stake_key) {
-            let remaining_amount = current_stake.amount - matured_amount;
-            if remaining_amount > 0 {
-                let updated_stake = ArtisanStakeData {
-                    amount: remaining_amount,
-                    token: current_stake.token,
-                };
-                env.storage().persistent().set(&stake_key, &updated_stake);
-                Self::extend_persistent(&env, &stake_key);
-            } else {
-                // No remaining stake, remove all stake-related keys
-                env.storage().persistent().remove(&stake_key);
-                let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
-                env.storage().persistent().remove(&cooldown_key);
-            }
+        let remaining_amount = current_stake.amount - matured_amount;
+        if remaining_amount > 0 {
+            let updated_stake = ArtisanStakeData {
+                amount: remaining_amount,
+                token: current_stake.token,
+            };
+            env.storage().persistent().set(&stake_key, &updated_stake);
+            Self::extend_persistent(&env, &stake_key);
+        } else {
+            env.storage().persistent().remove(&stake_key);
+            let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
+            env.storage().persistent().remove(&cooldown_key);
         }
 
         // Record unstake operation in history for audit trail (#237)
