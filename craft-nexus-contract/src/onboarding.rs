@@ -2306,14 +2306,16 @@ impl OnboardingContract {
     /// # Errors
     /// - Panics with [`Error::NotInitialized`] if config is missing.
     pub fn set_verification_thresholds(env: Env, min_escrow_count: u32, min_volume: i128) {
-        let mut config: OnboardingConfig = env
+        let config: OnboardingConfig = env
             .storage()
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
+        // Auth check before any storage mutation (#422).
         config.platform_admin.require_auth();
+
+        let mut config = config;
         config.min_escrow_count_for_verify = min_escrow_count;
         config.min_volume_for_verify = min_volume;
 

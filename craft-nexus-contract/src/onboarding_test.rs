@@ -2078,3 +2078,26 @@ fn test_has_active_contracts_unauthorized() {
 
     client.has_active_contracts(&user);
 }
+
+// ===== set_verification_thresholds auth tests (#422) =====
+
+#[test]
+fn test_set_verification_thresholds_admin_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    // Admin is authorized via mock_all_auths — must not panic.
+    client.set_verification_thresholds(&10u32, &5_000_000_000i128);
+    let config = client.get_config();
+    assert_eq!(config.min_escrow_count_for_verify, 10);
+    assert_eq!(config.min_volume_for_verify, 5_000_000_000);
+}
+
+#[test]
+#[should_panic]
+fn test_set_verification_thresholds_unauthorized_rejected() {
+    // Without any auth mocked, require_auth must cause a panic.
+    let env = Env::default();
+    let (client, _) = setup_test(&env);
+    client.set_verification_thresholds(&10u32, &5_000_000_000i128);
+}
