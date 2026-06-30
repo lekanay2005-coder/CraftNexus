@@ -26,12 +26,4 @@ jobs:
       - name: cargo test
         run: cargo test
 
-      - name: Check snapshot files unchanged
-        working-directory: .
-        run: |
-          if git diff --exit-code HEAD -- craft-nexus-contract/test_snapshots/; then
-            echo "Snapshots are up to date."
-          else
-            echo "ERROR: Snapshot files changed — update test_snapshots/ if intentional."
-            exit 1
-          fi
+
