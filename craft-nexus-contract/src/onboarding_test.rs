@@ -1,5 +1,5 @@
-use super::*;
 use super::Error;
+use super::*;
 use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String};
 
 fn string_to_bytes(env: &Env, s: &soroban_sdk::String) -> Bytes {
@@ -19,15 +19,6 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     client.initialize(&admin);
 
     (client, admin)
-}
-
-fn to_bytes(env: &Env, s: &String) -> Bytes {
-    let mut bytes = Bytes::new(env);
-    let len = s.len() as usize;
-    let mut buf = [0u8; 128];
-    s.copy_into_slice(&mut buf[..len]);
-    bytes.extend_from_slice(&buf[..len]);
-    bytes
 }
 
 // ===== Initialization =====
@@ -788,7 +779,7 @@ fn test_process_verification_request_unauthorized() {
 
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&DataKey::Config, &config);
-        let profile = UserProfile {
+        let profile = StoredUserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
             address: user.clone(),
             role: UserRole::Artisan,
@@ -797,7 +788,6 @@ fn test_process_verification_request_unauthorized() {
             is_verified: false,
             successful_trades: 0,
             disputed_trades: 0,
-            portfolio_cid: None,
             status: ProfileStatus::Active,
         };
         env.storage()
@@ -808,6 +798,7 @@ fn test_process_verification_request_unauthorized() {
     // No platform-admin signature is present, so require_auth() must panic and
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
+}
 // ============================================================
 // Issue #41 – admin_clear_verification_request authorization
 // ============================================================
@@ -849,11 +840,7 @@ fn test_admin_clear_verification_request_no_pending() {
 
     let (client, _admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(
-        &user,
-        &String::from_str(&env, "no_req"),
-        &UserRole::Artisan,
-    );
+    client.onboard_user(&user, &String::from_str(&env, "no_req"), &UserRole::Artisan);
 
     let was_pending = client.admin_clear_verification_request(&user);
     assert!(!was_pending);
@@ -869,11 +856,7 @@ fn test_admin_clear_verification_request_unauthorized() {
 
     let (client, _admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(
-        &user,
-        &String::from_str(&env, "victim"),
-        &UserRole::Artisan,
-    );
+    client.onboard_user(&user, &String::from_str(&env, "victim"), &UserRole::Artisan);
     client.request_verification(&user);
 
     // Drop all mocked authorizations so the admin's require_auth() fails.
@@ -983,6 +966,8 @@ fn test_get_user_migrates_legacy_profile() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let expected = string_to_bytes(&env, &portfolio_cid);
     let legacy = LegacyUserProfile {
         address: user.clone(),
         role: UserRole::Buyer,
@@ -991,7 +976,7 @@ fn test_get_user_migrates_legacy_profile() {
         is_verified: false,
         successful_trades: 0,
         disputed_trades: 0,
-        portfolio_cid: None,
+        portfolio_cid: Some(portfolio_cid),
     };
 
     env.as_contract(&client.address, || {
@@ -1003,14 +988,23 @@ fn test_get_user_migrates_legacy_profile() {
     let migrated = client.get_user(&user);
     assert_eq!(migrated.version, CURRENT_USER_PROFILE_VERSION);
     assert_eq!(migrated.username, Symbol::new(&env, "legacy_user"));
+    assert_eq!(migrated.portfolio_cid, Some(expected.clone()));
 
-    let stored: UserProfile = env.as_contract(&client.address, || {
+    let stored: StoredUserProfile = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::UserProfile(user))
             .unwrap()
     });
     assert_eq!(stored.version, CURRENT_USER_PROFILE_VERSION);
+
+    let stored_portfolio: Bytes = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserPortfolio(migrated.address.clone()))
+            .unwrap()
+    });
+    assert_eq!(stored_portfolio, expected);
 }
 
 // ============================================================
@@ -1242,10 +1236,8 @@ fn test_change_username_with_special_characters() {
     let updated = client.change_username(&user, &new_username);
 
     // Should be normalized with underscores
-    assert_eq!(
-        updated.username,
-        Symbol::new(&env, "new_user_name_123")
-    );}
+    assert_eq!(updated.username, Symbol::new(&env, "new_user_name_123"));
+}
 
 #[test]
 fn test_change_username_preserves_other_fields() {
@@ -1302,7 +1294,7 @@ fn test_bump_user_profile_ttl_unauthorized() {
 
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&DataKey::Config, &config);
-        let profile = UserProfile {
+        let profile = StoredUserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
             address: user.clone(),
             role: UserRole::Buyer,
@@ -1311,7 +1303,6 @@ fn test_bump_user_profile_ttl_unauthorized() {
             is_verified: false,
             successful_trades: 0,
             disputed_trades: 0,
-            portfolio_cid: None,
             status: ProfileStatus::Active,
         };
         env.storage()
@@ -1404,6 +1395,33 @@ fn test_update_portfolio_success() {
 }
 
 #[test]
+fn test_onboard_user_stores_flat_profile_without_portfolio_key() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_flat");
+
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    let stored: StoredUserProfile = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserProfile(user.clone()))
+            .unwrap()
+    });
+    assert_eq!(stored.version, CURRENT_USER_PROFILE_VERSION);
+
+    let has_portfolio_key = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .has(&DataKey::UserPortfolio(user.clone()))
+    });
+    assert!(!has_portfolio_key);
+}
+
+#[test]
 fn test_update_portfolio_with_cidv1() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1445,6 +1463,37 @@ fn test_update_portfolio_remove() {
     // Remove portfolio
     let updated = client.update_portfolio(&user, &None);
     assert_eq!(updated.portfolio_cid, None);
+}
+
+#[test]
+fn test_update_portfolio_uses_separate_storage_key() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_split");
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let expected = string_to_bytes(&env, &portfolio_cid);
+    client.update_portfolio(&user, &Some(portfolio_cid));
+
+    let stored: StoredUserProfile = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserProfile(user.clone()))
+            .unwrap()
+    });
+    assert_eq!(stored.version, CURRENT_USER_PROFILE_VERSION);
+
+    let stored_portfolio: Bytes = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserPortfolio(user.clone()))
+            .unwrap()
+    });
+    assert_eq!(stored_portfolio, expected);
 }
 
 #[test]
@@ -1580,6 +1629,58 @@ fn test_portfolio_preserves_other_fields() {
     assert!(!updated.is_verified);
     assert_eq!(updated.address, user);
     assert_eq!(updated.registered_at, original.registered_at);
+}
+
+#[test]
+fn test_migrate_user_profile_moves_embedded_portfolio_to_separate_key() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let expected = string_to_bytes(&env, &portfolio_cid);
+
+    let versioned_profile = UserProfile {
+        version: 4,
+        address: user.clone(),
+        role: UserRole::Artisan,
+        username: Symbol::new(&env, "legacy_artisan"),
+        registered_at: 1234,
+        is_verified: true,
+        successful_trades: 2,
+        disputed_trades: 1,
+        portfolio_cid: Some(expected.clone()),
+        status: ProfileStatus::Active,
+    };
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserProfile(user.clone()), &versioned_profile);
+    });
+
+    assert!(client.migrate_user_profile(&user));
+
+    let migrated = client.get_user(&user);
+    assert_eq!(migrated.version, CURRENT_USER_PROFILE_VERSION);
+    assert_eq!(migrated.portfolio_cid, Some(expected.clone()));
+
+    let stored: StoredUserProfile = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserProfile(user.clone()))
+            .unwrap()
+    });
+    assert_eq!(stored.version, CURRENT_USER_PROFILE_VERSION);
+
+    let stored_portfolio: Bytes = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserPortfolio(user.clone()))
+            .unwrap()
+    });
+    assert_eq!(stored_portfolio, expected);
 }
 
 // ===== Error Enum Tests (Issue #120) =====
@@ -1824,7 +1925,11 @@ fn test_update_active_contracts_underflow_panics() {
 
     let (client, admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "underflow"), &UserRole::Buyer);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "underflow"),
+        &UserRole::Buyer,
+    );
 
     let escrow_id = env.register_contract(None, crate::CraftNexusContract);
     client.set_escrow_contract(&escrow_id);
@@ -1933,7 +2038,6 @@ fn test_is_verification_pending_unauthorized() {
     client.is_verification_pending(&user);
 }
 
-
 // ── Issue #470: [SECURITY] Endpoint #69 – set_moderator ─────────────────────
 
 /// Issue #470 — set_moderator must record the admin auth signal on success.
@@ -1944,13 +2048,20 @@ fn test_set_moderator_records_admin_auth() {
 
     let (client, admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &soroban_sdk::String::from_str(&env, "promotee"), &UserRole::Artisan);
+    client.onboard_user(
+        &user,
+        &soroban_sdk::String::from_str(&env, "promotee"),
+        &UserRole::Artisan,
+    );
 
     client.set_moderator(&user);
 
     let auths = env.auths();
     let admin_auth = auths.iter().find(|(addr, _)| addr == &admin);
-    assert!(admin_auth.is_some(), "admin auth must be recorded for set_moderator");
+    assert!(
+        admin_auth.is_some(),
+        "admin auth must be recorded for set_moderator"
+    );
 
     let profile = client.get_user(&user);
     assert_eq!(profile.role, UserRole::Moderator);
@@ -1966,7 +2077,11 @@ fn test_set_moderator_non_admin_rejected() {
     let (client, _admin) = setup_test(&env);
     let attacker = Address::generate(&env);
     let target = Address::generate(&env);
-    client.onboard_user(&target, &soroban_sdk::String::from_str(&env, "victim"), &UserRole::Buyer);
+    client.onboard_user(
+        &target,
+        &soroban_sdk::String::from_str(&env, "victim"),
+        &UserRole::Buyer,
+    );
 
     // Strip all mocked auths so only a non-admin caller could sign.
     env.set_auths(&[]);
@@ -2031,16 +2146,26 @@ fn test_get_verification_queue_returns_pending_users() {
     let (client, admin) = setup_test(&env);
 
     let user = Address::generate(&env);
-    client.onboard_user(&user, &soroban_sdk::String::from_str(&env, "queueuser"), &UserRole::Artisan);
+    client.onboard_user(
+        &user,
+        &soroban_sdk::String::from_str(&env, "queueuser"),
+        &UserRole::Artisan,
+    );
     client.request_verification(&user);
 
     let queue = client.get_verification_queue();
 
-    assert!(queue.contains(&user), "requesting user must appear in the verification queue");
+    assert!(
+        queue.contains(&user),
+        "requesting user must appear in the verification queue"
+    );
 
     let auths = env.auths();
     let admin_auth = auths.iter().find(|(addr, _)| addr == &admin);
-    assert!(admin_auth.is_some(), "admin auth must be recorded for get_verification_queue");
+    assert!(
+        admin_auth.is_some(),
+        "admin auth must be recorded for get_verification_queue"
+    );
 }
 
 // ── Issue #430: [SECURITY] Endpoint #29 – get_user_metrics ───────────────────
