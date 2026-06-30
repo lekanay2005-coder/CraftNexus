@@ -2155,3 +2155,19 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
 }
+}
+
+#[test]
+#[should_panic]
+fn test_update_user_role_admin_escalation_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "escalator");
+    client.onboard_user(&user, &username, &UserRole::Buyer);
+
+    client.update_user_role(&user, &UserRole::Admin);
+}
