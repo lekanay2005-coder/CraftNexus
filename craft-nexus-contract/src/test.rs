@@ -100,7 +100,7 @@ fn test_create_escrow_success() {
     // Verify event
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(last_event.0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
@@ -263,7 +263,7 @@ fn test_dispute_escrow_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -597,7 +597,7 @@ fn test_update_platform_fee() {
     assert_eq!(client.get_platform_fee(), 800);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
@@ -726,7 +726,7 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     assert_eq!(client.get_effective_fee_bps(&seller), 750);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -938,6 +938,66 @@ fn test_update_admin_requires_new_admin_cosign() {
     let new_admin = Address::generate(&env);
     // No auth is mocked — both current-admin and new_admin auth will fail.
     client.update_admin(&new_admin);
+}
+
+// ===== Admin recovery error tests (#415) =====
+
+fn assert_admin_recovery_failed(
+    result: Result<
+        Result<(), soroban_sdk::ConversionError>,
+        Result<Error, soroban_sdk::InvokeError>,
+    >,
+) {
+    assert!(matches!(result, Err(Ok(Error::AdminRecoveryFailed))));
+}
+
+#[test]
+fn test_recover_admin_missing_fallback_returns_standard_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let recovered_admin = Address::generate(&env);
+    let result = client.try_recover_admin_access(&recovered_admin);
+
+    assert_admin_recovery_failed(result);
+}
+
+#[test]
+fn test_recover_admin_invalid_address_returns_standard_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::FallbackAdmin, &admin);
+    });
+
+    let result = client.try_recover_admin_access(&client.address);
+
+    assert_admin_recovery_failed(result);
+}
+
+#[test]
+fn test_recover_admin_timelock_returns_standard_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::FallbackAdmin, &admin);
+    });
+
+    let recovered_admin = Address::generate(&env);
+    let initial_result = client.try_recover_admin_access(&recovered_admin);
+    assert_admin_recovery_failed(initial_result);
+
+    let locked_result = client.try_recover_admin_access(&recovered_admin);
+    assert_admin_recovery_failed(locked_result);
 }
 
 #[test]
@@ -1361,7 +1421,7 @@ fn test_set_min_escrow_amount_emits_config_event() {
     client.set_min_escrow_amount(&token_id, &1_00000);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
 
     assert_eq!(
@@ -1969,7 +2029,7 @@ fn test_extend_release_window_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2554,7 +2614,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     assert!(is_valid);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2579,7 +2639,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2596,7 +2656,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&false);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -3052,11 +3112,7 @@ fn test_partial_refund_negotiation_flow() {
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
 
     // 1. Dispute the escrow
-    client.dispute_escrow(
-        &1,
-        &Symbol::new(&env, "Partial_refund_requested"),
-        &buyer,
-    );
+    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_refund_requested"), &buyer);
 
     // 2. Buyer proposes a 300 refund
     client.propose_partial_refund(&1, &300, &buyer);
@@ -3083,11 +3139,7 @@ fn test_propose_partial_refund_by_seller() {
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
 
-    client.dispute_escrow(
-        &1,
-        &Symbol::new(&env, "Partial_refund_offered"),
-        &seller,
-    );
+    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_refund_offered"), &seller);
 
     // Seller proposes a 400 refund
     client.propose_partial_refund(&1, &400, &seller);
