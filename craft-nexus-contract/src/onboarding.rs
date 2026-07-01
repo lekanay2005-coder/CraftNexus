@@ -81,6 +81,7 @@
 //! out-of-date shape through the read API.
 
 
+
 use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
@@ -3373,7 +3374,7 @@ impl OnboardingContract {
     /// # Returns
     /// Tuple `(successful_trades, disputed_trades)`.
     pub fn get_user_reputation(env: Env, address: Address) -> (u32, u32) {
-        // Issue #426/#434: require auth to prevent unauthorized access to sensitive trade data
+        // Issue #426/#434/#446: require auth to prevent unauthorized access to sensitive trade data
         address.require_auth();
         let key = DataKey::UserProfile(address.clone());
         match env

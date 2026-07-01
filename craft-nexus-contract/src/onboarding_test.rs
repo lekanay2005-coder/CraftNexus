@@ -810,6 +810,7 @@ fn test_process_verification_request_unauthorized() {
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
 }
+
 // ============================================================
 // Issue #41 – admin_clear_verification_request authorization
 // ============================================================
@@ -2104,6 +2105,26 @@ fn test_get_user_reputation_unauthorized() {
     });
 
     client.get_user_reputation(&user);
+}
+
+/// Issue #446 — get_user_reputation must allow authorized callers.
+#[test]
+fn test_get_user_reputation_authorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    
+    // Onboard user
+    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan);
+
+    // Update reputation
+    client.update_reputation(&user, &2u32, &1u32);
+    
+    // Get reputation (authorized)
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 2);
+    assert_eq!(disputed, 1);
 }
 
 // ── Issue #452: [FEATURE] Business flow #51 – active contract authorization ─
