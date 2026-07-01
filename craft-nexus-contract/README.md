@@ -894,6 +894,22 @@ for (const evt of ledgerEvents) {
 - **Onboarding Contract**: `[DEPLOY_AND_UPDATE]`
 - **Escrow Contract**: `[DEPLOY_AND_UPDATE]`
 
+### Address Synchronization
+
+Contract addresses in this file and in `stellar.toml` are automatically verified to stay in sync via CI. When updating a contract address:
+
+1. Update the address in **both** `README.md` and `stellar.toml`
+2. Push your changes
+3. The CI workflow (`.github/workflows/contract-address-check.yml`) will verify they match
+4. If they don't match, the CI check will fail and show which file is missing the address
+
+To run the check locally before pushing:
+```bash
+bash scripts/check-contract-addresses.sh
+```
+
+See `scripts/check-contract-addresses.sh` for implementation details.
+
 ---
 
 ## Security Considerations
