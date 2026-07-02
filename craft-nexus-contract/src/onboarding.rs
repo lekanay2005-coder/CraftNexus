@@ -88,7 +88,6 @@ use soroban_sdk::{
     Symbol, TryFromVal, Val, Vec,
 };
 extern crate alloc;
-use crate::alloc::string::ToString;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
@@ -144,6 +143,10 @@ const BASE58_BTC_CHARSET: [bool; 256] = {
 const USERNAME_CHANGE_COOLDOWN: u64 = 30 * 24 * 60 * 60;
 /// Maximum verification history entries retained per user (#519).
 const MAX_VERIFICATION_HISTORY: u32 = 10;
+
+#[cfg(not(target_family = "wasm"))]
+#[path = "decimal_test_token.rs"]
+pub mod decimal_test_token;
 
 #[cfg(test)]
 #[path = "onboarding_test.rs"]
