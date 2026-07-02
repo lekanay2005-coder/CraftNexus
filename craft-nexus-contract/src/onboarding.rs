@@ -2272,7 +2272,8 @@ impl OnboardingContract {
     /// # Preconditions
     /// - User must be onboarded (have an existing profile)
     /// - Profile must not already be deactivated
-    /// - User must not have active escrows (checked via escrow contract)
+    /// - User must not have active escrows (checked via the configured escrow contract)
+    /// - If no escrow contract is registered, deactivation is rejected conservatively because active escrow obligations cannot be verified
     /// - Admin user profile cannot be deactivated
     ///
     /// # Reverts if
@@ -2315,6 +2316,8 @@ impl OnboardingContract {
             if client.has_active_escrows(&user) {
                 env.panic_with_error(Error::ActiveEscrowsExist);
             }
+        } else {
+            env.panic_with_error(Error::ActiveEscrowsExist);
         }
 
         // Release username so others can take it

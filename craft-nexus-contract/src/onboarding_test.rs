@@ -1839,6 +1839,19 @@ fn test_update_active_contracts_underflow_panics() {
 
 #[test]
 #[should_panic]
+fn test_deactivate_profile_rejects_without_registered_escrow_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "noescrow"), &UserRole::Buyer);
+
+    client.deactivate_profile(&user);
+}
+
+#[test]
+#[should_panic]
 fn test_deactivate_profile_rejects_active_contract_count() {
     let env = Env::default();
     env.mock_all_auths();
