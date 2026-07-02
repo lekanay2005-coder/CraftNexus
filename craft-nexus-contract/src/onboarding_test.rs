@@ -1,6 +1,6 @@
 use super::*;
 use super::Error;
-use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, token, Address, Bytes, Env, String};
 
 fn string_to_bytes(env: &Env, s: &soroban_sdk::String) -> Bytes {
     let mut buf = [0u8; 128];
