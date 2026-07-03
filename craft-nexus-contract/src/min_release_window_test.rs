@@ -4,9 +4,8 @@ use crate::{CraftNexusContract, CraftNexusContractClient};
 use soroban_sdk::vec;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, Address, Env, Vec,
+    token, Address, Env,
 };
-use soroban_sdk::vec;
 
 const DEFAULT_MIN_RELEASE_WINDOW: u32 = 24 * 60 * 60; // 1 day
 const ONE_HOUR: u32 = 60 * 60;
@@ -20,7 +19,7 @@ fn setup_test() -> (
     Address,
     Address,
     Address,
-    Address,
+    Address, 
     Address,
 ) {
     let env = Env::default();
