@@ -81,13 +81,12 @@ use crate::alloc::string::ToString;
 // on first read (internal `try_get_user_profile`); integrators never observe an
 // out-of-date shape through the read API.
 
-extern crate alloc;
-
-use alloc::string::ToString;
+use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, IntoVal, TryFromVal, Val, Vec,
 };
+
 extern crate alloc;
 use crate::alloc::string::ToString;
 
@@ -1461,13 +1460,7 @@ impl OnboardingContract {
                 env.storage().persistent().set(&key, &cid);
                 Self::extend_persistent(env, &key);
             }
-            None => env.storage().persistent().remove(&key),
-        }
-    }
-
-            // ---> ADD THIS LINE TO FIX THE TTL BUG <---
             Self::extend_persistent(env, &key);
-
             return Some(profile);
         }
 

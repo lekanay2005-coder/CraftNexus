@@ -1,29 +1,5 @@
-use super::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
-use super::Error;
 use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
-    token, Address, Bytes, Env, String,
-};
-
-fn register_decimal_test_token(env: &Env, decimals: u32) -> Address {
-    let admin = Address::generate(env);
-    let contract_id = env.register_contract(None, DecimalTestToken);
-    DecimalTestTokenClient::new(env, &contract_id).initialize(&admin, &decimals);
-    contract_id
-}
-
-const AUTO_VERIFY_VOLUME_THRESHOLD: i128 = 10_000_000_000;
-const AUTO_VERIFY_ESCROW_THRESHOLD: u32 = 5;
-
-fn string_to_bytes(env: &Env, s: &soroban_sdk::String) -> Bytes {
-    let mut buf = [0u8; 128];
-    let len = s.len() as usize;
-    s.copy_into_slice(&mut buf[..len]);
-    let mut b = Bytes::new(env);
-    b.extend_from_slice(&buf[..len]);
-    b
-}
+use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String, Symbol};
 
 fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     let contract_id = env.register_contract(None, OnboardingContract);
@@ -33,16 +9,6 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     client.initialize(&admin);
 
     (client, admin)
-}
-
-#[allow(dead_code)]
-fn to_bytes(env: &Env, s: &String) -> Bytes {
-    let mut bytes = Bytes::new(env);
-    let len = s.len() as usize;
-    let mut buf = [0u8; 128];
-    s.copy_into_slice(&mut buf[..len]);
-    bytes.extend_from_slice(&buf[..len]);
-    bytes
 }
 
 // ===== Initialization =====
@@ -1446,7 +1412,7 @@ fn test_update_portfolio_success() {
 
     // Update portfolio with valid CIDv0
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &portfolio_cid);
+    let expected = Bytes::from_slice(&env, portfolio_cid.to_string().as_bytes());
     let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
 
     assert_eq!(updated.portfolio_cid, Some(expected));
@@ -1497,7 +1463,7 @@ fn test_update_portfolio_with_cidv1() {
         &env,
         "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
     );
-    let expected = string_to_bytes(&env, &portfolio_cid);
+    let expected = Bytes::from_slice(&env, portfolio_cid.to_string().as_bytes());
     let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
 
     assert_eq!(updated.portfolio_cid, Some(expected));
@@ -1619,7 +1585,7 @@ fn test_portfolio_accessible_via_get_user() {
 
     // Update portfolio
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &portfolio_cid);
+    let expected = Bytes::from_slice(&env, portfolio_cid.to_string().as_bytes());
     client.update_portfolio(&user, &Some(portfolio_cid.clone()));
 
     // Verify portfolio is accessible via get_user
@@ -1641,7 +1607,7 @@ fn test_portfolio_accessible_via_get_user_by_username() {
 
     // Update portfolio
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &portfolio_cid);
+    let expected = Bytes::from_slice(&env, portfolio_cid.to_string().as_bytes());
     client.update_portfolio(&user, &Some(portfolio_cid.clone()));
 
     // Verify portfolio is accessible via get_user_by_username

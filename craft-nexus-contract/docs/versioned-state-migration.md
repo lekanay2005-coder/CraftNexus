@@ -1,80 +1,67 @@
-# Versioned State Migration
+# Versioned State Migration Runbook
 
-## Scope
+This document details the step-by-step procedure required to safely execute state migrations for the smart contract across different schema versions.
 
-This contract uses explicit schema versions for persisted records that have
-changed shape over time:
+---
 
-- `Escrow`
-- onboarding `UserProfile`
+## General Migration Lifecycle Workflow
 
-The current onboarding profile schema version is `5`.
+For every migration version, operators must strictly adhere to the following sequence:
 
-## Onboarding Profile Layout
+1. **Pre-Migration Checks:** Verify the current version in contract storage.
+2. **Migration Invocation:** Execute the targeted Soroban contract command.
+3. **Post-Migration Verification:** Ensure the state matches the structural rules of the new schema version.
 
-`UserProfile` is now split into:
+---
 
-- `DataKey::UserProfile(address)` storing a flat `StoredUserProfile`
-- `DataKey::UserPortfolio(address)` storing raw CID `Bytes` when present
+## Migration 1: UserProfile (v1 -&gt; v2)
 
-Public onboarding methods still return a composed `UserProfile` that includes
-`portfolio_cid`, but the optional CID payload no longer increases rent for the
-main profile entry.
+### 1. Pre-Migration Checks
 
-## Migration Strategy
+Verify that the `UserProfile` entries are on `v1` structure before applying the layout change. Ensure contract balance constraints are satisfied.
 
-Onboarding profiles are upgraded lazily on read and may also be upgraded
-proactively through `migrate_user_profile(user)`:
+### 2. Migration Invocation Command
 
-1. read the raw persistent value from `DataKey::UserProfile`
-2. inspect the underlying map for `version` and `portfolio_cid`
-3. decode legacy versionless records as `LegacyUserProfile`
-4. decode versioned records with embedded `portfolio_cid` as the old public shape
-5. rewrite the profile into the flat `StoredUserProfile` schema
-6. move any embedded portfolio CID into `DataKey::UserPortfolio(address)`
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_user_profile
+```
 
-This keeps old state readable without a one-shot migration transaction and
-ensures newly touched records are normalized automatically.
+### 3. Post-Migration Verification
+Query individual user state fields using a read-only instance to verify the presence of the updated fields introduced in v2.
 
-## Admin Helper
+## Migration 2: WhitelistedTokens (Map -> Individual Keys)
+### 1. Pre-Migration Checks
+Read the legacy configuration Map to ensure total token allocations match current baseline expectations.
 
-`OnboardingContract::migrate_user_profile(user)` is:
+### 2. Migration Invocation Command
 
-- admin-only
-- bounded to one user per call
-- idempotent
-- returns `true` only when storage was rewritten during that invocation
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_token_whitelist
 
-Lazy migration remains the fallback for normal read/write flows, so the helper
-is optional operationally.
+### 3. Post-Migration Verification
+Confirm that separate storage slot configurations can be fetched individually per token address instead of a singular monolith Map structure.
 
-## Backward Compatibility Notes
+## Migration 3: ArtisanStakeQueue (Vec -> Indexed Queue)
+### 1. Pre-Migration Checks
+Assert that the legacy sequential Vec structure does not exceed maximum heap layout sizes, checking data continuity flags.
 
-- legacy versionless onboarding profiles are upgraded to version `5`
-- older versioned onboarding profiles that still embed `portfolio_cid` are
-  rewritten to the flat schema and keep the same business fields
-- portfolio CIDs remain available through `get_user`, `get_user_by_username`,
-  and `update_portfolio`
+### 2. Migration Invocation Command
 
-## Persisted-State Audit
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_stake_queue
 
-The storage-rent audit for issue `#641` was limited to persisted state structs:
-
-- onboarding `UserProfile` was flattened by moving `portfolio_cid` to a
-  dedicated key
-- `UserMetrics` already follows the recommended flat-scalar layout
-- deprecated legacy `Vec`-based keys remain read-only migration inputs until
-  their existing lazy migration paths consume them
-
-Request/response-only types and transient function parameters were intentionally
-left unchanged.
-
-## Test Coverage
-
-Migration behavior is covered by host tests that:
-
-- inject legacy versionless onboarding profiles directly
-- inject versioned onboarding profiles that still embed `portfolio_cid`
-- call `get_user` and `migrate_user_profile`
-- assert the returned public shape still includes `portfolio_cid`
-- assert the persisted main profile is flat and the CID is stored separately
+### 3. Post-Migration Verification
+Run an index query range verification step to ensure elements read correctly from their respective indexed queue positions without errors.
