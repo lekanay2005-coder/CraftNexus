@@ -111,7 +111,7 @@ export default function VerificationPortal() {
                  </li>
                  <li className="flex items-center gap-3 text-sm group/item">
                     <LuZap className="text-[#C4928F] shrink-0" size={18} />
-                    <span className="text-gray-400 group-hover/item:text-white transition-colors tracking-tight">Priority in "Featured" Sections</span>
+                    <span className="text-gray-400 group-hover/item:text-white transition-colors tracking-tight">Priority in &quot;Featured&quot; Sections</span>
                  </li>
                  <li className="flex items-center gap-3 text-sm opacity-30">
                     <LuZap className="text-gray-500 shrink-0" size={18} />

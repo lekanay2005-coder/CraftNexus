@@ -42,7 +42,7 @@ export default function WorkshopOverview() {
       <section className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
         <div className="space-y-1">
           <h1 className="text-3xl font-bold text-gray-900 font-serif">Workshop Overview</h1>
-          <p className="text-sm text-gray-500">Welcome back, Artisan. Here's what's happening today.</p>
+          <p className="text-sm text-gray-500">Welcome back, Artisan. Here&apos;s what&apos;s happening today.</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="flex -space-x-2">

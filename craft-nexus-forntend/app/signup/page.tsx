@@ -3,6 +3,9 @@
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { signupSchema } from "@/lib/validations/auth";
+import * as z from "zod";
+
+type SignupFormData = z.infer<typeof signupSchema>;
 import Image from "next/image";
 import Link from "next/link";
 
@@ -11,7 +14,7 @@ export default function SignupPage() {
     resolver: zodResolver(signupSchema),
   });
 
-  const onSubmit = (data: any) => {
+  const onSubmit = (data: SignupFormData) => {
     console.log("Form Data:", data);
   };
 
@@ -121,7 +124,12 @@ export default function SignupPage() {
 }
 
 // Reusable Input Component
-const Input = ({ label, error, ...props }: any) => (
+interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  label: string;
+  error?: string;
+}
+
+const Input = ({ label, error, ...props }: InputProps) => (
   <div className="flex flex-col w-full">
     <label className="text-[13px] font-semibold text-[#1A1A1A] mb-1.5 ml-1">{label}</label>
     <input 

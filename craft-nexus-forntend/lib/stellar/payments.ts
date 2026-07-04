@@ -2,7 +2,7 @@
  * Stellar Payment Service
  * Handles USDC payments and transactions on Stellar network
  */
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 
 import {
   Horizon,
