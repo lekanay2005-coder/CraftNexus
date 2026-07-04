@@ -151,7 +151,6 @@ export class EscrowContractService {
   /**
    * Create escrow for an order
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async createEscrow(params: ContractEscrowParams): Promise<string> {
     if (!ESCROW_CONTRACT_ADDRESS) {
       throw new Error("Escrow contract not deployed");
@@ -195,7 +194,7 @@ export class EscrowContractService {
     try {
       // Note: This is a placeholder
       // In production, you would build and submit the transaction
-      console.log(`Simulating release funds for Order ID: ${orderId} by Secret: ${signerSecret.substring(0, 5)}...`);
+      console.log(`Simulating release funds for Order ID: ${_orderId} by Secret: ${_signerSecret.substring(0, 5)}...`);
 
       return "transaction_hash_placeholder";
     } catch (error) {

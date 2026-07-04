@@ -209,7 +209,7 @@ export const ConnectWalletModal = ({
           <div className="mt-6 p-4 bg-blue-50 border border-blue-100 rounded-xl">
             <div className="flex flex-col gap-2 text-xs text-blue-800">
               <p className="font-bold">Freighter not detected</p>
-              <p>If you just installed Freighter, please refresh this page and make sure it's enabled.</p>
+              <p>If you just installed Freighter, please refresh this page and make sure it&apos;s enabled.</p>
               <a
                 href="https://freighter.app"
                 target="_blank"
