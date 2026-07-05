@@ -2073,7 +2073,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "onboarding_call_failed"
+                "symbol": "OB_FAIL"
               },
               {
                 "symbol": "update_active_contracts"
@@ -2203,7 +2203,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "onboarding_call_failed"
+                "symbol": "OB_FAIL"
               },
               {
                 "symbol": "update_active_contracts"
