@@ -2193,6 +2193,27 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
 }
 
 #[test]
+#[should_panic]
+fn test_set_verification_thresholds_non_admin_rejected() {
+    let env = Env::default();
+    let (client, _admin) = setup_test(&env);
+    let non_admin = Address::generate(&env);
+
+    // Mock auth for non_admin, but contract expects admin's auth.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_verification_thresholds",
+            args: (10u32, 5_000_000_000i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.set_verification_thresholds(&10u32, &5_000_000_000i128);
+}
+
+#[test]
 fn test_onboarding_config_ttl_extension_on_read() {
     let env = Env::default();
     env.mock_all_auths();
