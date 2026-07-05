@@ -435,6 +435,25 @@ fn test_update_user_role() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_update_user_role_to_admin_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "test_user_admin"),
+        &UserRole::Buyer,
+    );
+
+    // This should panic with Error::InvalidRole (code 6)
+    client.update_user_role(&user, &UserRole::Admin);
+}
+
+#[test]
 fn test_set_moderator() {
     let env = Env::default();
     env.mock_all_auths();
