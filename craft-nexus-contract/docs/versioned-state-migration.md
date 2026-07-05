@@ -1,71 +1,67 @@
-# Versioned State Migration
+# Versioned State Migration Runbook
 
-## Scope
+This document details the step-by-step procedure required to safely execute state migrations for the smart contract across different schema versions.
 
-This contract stores explicit schema versions on:
+---
 
-- `Escrow`
-- `UserProfile`
+## General Migration Lifecycle Workflow
 
-The current `Escrow` schema version is `3` (`CURRENT_ESCROW_VERSION`).
+For every migration version, operators must strictly adhere to the following sequence:
 
-## Escrow Schema History
+1. **Pre-Migration Checks:** Verify the current version in contract storage.
+2. **Migration Invocation:** Execute the targeted Soroban contract command.
+3. **Post-Migration Verification:** Ensure the state matches the structural rules of the new schema version.
 
-The `Escrow` record has evolved through three on-chain shapes. Older records
-are migrated lazily on read:
+---
 
-- **Legacy (pre-versioning, `LegacyEscrow`)** - no `version` field, no
-  `batch_id`, and `dispute_reason` stored as a `String`.
-- **v2 (`EscrowWithoutBatch`)** - adds an explicit `version` field but still
-  has no `batch_id`.
-- **v3 (`Escrow`, current)** - adds `batch_id: Option<u64>`, normalizes
-  `dispute_reason` to a lightweight `Symbol`, and adds the `funded` flag.
+## Migration 1: UserProfile (v1 -&gt; v2)
 
-## Migration Strategy
+### 1. Pre-Migration Checks
 
-Existing on-chain records created before a given change do not contain the
-newer fields. To preserve compatibility, reads decode the raw persistent value
-and select the correct struct shape:
+Verify that the `UserProfile` entries are on `v1` structure before applying the layout change. Ensure contract balance constraints are satisfied.
 
-1. read the raw persistent value as a `Val`
-2. inspect the underlying map for the `version` key
-3. if `version` is present, check for the `batch_id` key to distinguish the
-   current `Escrow` shape from the `EscrowWithoutBatch` shape
-4. if `version` is absent, decode as the pre-versioning `LegacyEscrow`
-5. upgrade the decoded record to the current schema and rewrite it immediately
+### 2. Migration Invocation Command
 
-This upgrade happens lazily on read through:
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_user_profile
+```
 
-- `EscrowContract::get_escrow` (and its internal helpers
-  `get_stored_escrow` / `try_get_escrow_readonly`)
-- `upgrade_escrow`, which stamps the current version and persists the result
-- `escrow_from_without_batch`, which lifts a v2 record to the current shape
-- `OnboardingContract::get_user` for `UserProfile`
+### 3. Post-Migration Verification
+Query individual user state fields using a read-only instance to verify the presence of the updated fields introduced in v2.
 
-## Why Lazy Upgrade
+## Migration 2: WhitelistedTokens (Map -> Individual Keys)
+### 1. Pre-Migration Checks
+Read the legacy configuration Map to ensure total token allocations match current baseline expectations.
 
-- avoids a one-shot migration transaction
-- keeps old state readable without downtime
-- amortizes migration cost across normal usage
-- ensures newly touched records are normalized automatically
+### 2. Migration Invocation Command
 
-## Backward Compatibility Notes
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_token_whitelist
 
-- `LegacyEscrow` data is upgraded to `version = CURRENT_ESCROW_VERSION` with
-  `batch_id = None` and `funded = true`
-- `EscrowWithoutBatch` (v2) data is upgraded with `batch_id = None`
-- records with `version < 3` have `funded` set to `true` during upgrade
-- business fields are preserved during upgrade
-- migrated entries are written back to persistent storage immediately
+### 3. Post-Migration Verification
+Confirm that separate storage slot configurations can be fetched individually per token address instead of a singular monolith Map structure.
 
-## Test Coverage
+## Migration 3: ArtisanStakeQueue (Vec -> Indexed Queue)
+### 1. Pre-Migration Checks
+Assert that the legacy sequential Vec structure does not exceed maximum heap layout sizes, checking data continuity flags.
 
-Migration behavior is covered by host tests that:
+### 2. Migration Invocation Command
 
-- inject a legacy `Escrow` (`LegacyEscrow`) directly into persistent storage
-  (`test_get_escrow_migrates_legacy_state`)
-- inject a legacy `UserProfile` directly
-  (`test_get_user_migrates_legacy_profile`)
-- read the records back through public contract methods
-- assert the returned and persisted values are upgraded to the current schema
-  version with the new fields defaulted correctly
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_stake_queue
+
+### 3. Post-Migration Verification
+Run an index query range verification step to ensure elements read correctly from their respective indexed queue positions without errors.
