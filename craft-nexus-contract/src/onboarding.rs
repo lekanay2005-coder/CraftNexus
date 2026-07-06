@@ -83,18 +83,10 @@
 use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
-    Symbol, IntoVal, TryFromVal, Val, Vec,
+    Symbol, TryFromVal, Val, Vec,
 };
 
-extern crate alloc;
 
-extern crate alloc;
-
-use alloc::string::ToString;
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
-    Symbol, IntoVal, TryFromVal, Val, Vec,
-};
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
