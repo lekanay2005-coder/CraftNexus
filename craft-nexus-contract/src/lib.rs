@@ -166,6 +166,7 @@ pub fn is_retryable(error: Error) -> bool {
 const ESCROW: Symbol = symbol_short!("ESCROW");
 const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
 const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
+const ONBOARD_CALL_FAILED: Symbol = symbol_short!("OB_FAIL");
 
 const BASE58_BTC_CHARSET: [bool; 256] = {
     let mut chars = [false; 256];
@@ -1830,7 +1831,7 @@ impl CraftNexusContract {
     /// integration drift between the escrow and onboarding contracts.
     fn emit_onboarding_call_failed(env: &Env, method: Symbol, address: Address) {
         env.events().publish(
-            (Symbol::new(env, "onboarding_call_failed"), method),
+            (ONBOARD_CALL_FAILED, method),
             (address, env.ledger().timestamp()),
         );
     }
