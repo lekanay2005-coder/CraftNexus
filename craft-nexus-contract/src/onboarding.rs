@@ -1,28 +1,160 @@
 //! Onboarding Contract
 //!
-//! Handles user registration (onboarding), role assignments, username configuration,
-//! profile management, and verification processes for buyers and artisans on the CraftNexus platform.
+// Handles user registration (onboarding), role assignments, username configuration,
+// profile management, and verification processes for buyers and artisans on the CraftNexus platform.
+//
+// # Integration guide
+//
+// This section documents the integration surface that off-chain indexers and
+// client interfaces depend on (Issue #453 / component #52). Three integration
+// channels exist: the **read API** (view functions), the **event stream**, and
+// the **cross-contract interface** shared with the escrow contract.
+//
+// ## Read API for indexers and clients
+//
+// All read functions are side-effect free with respect to *state shape* but
+// refresh the persistent TTL of the entries they touch (via the internal
+// `extend_persistent` helper). Repeatedly reading a profile is
+// therefore safe and additionally keeps the entry from being archived.
+//
+// | Function | Returns | Notes |
+// |----------|---------|-------|
+// | [`OnboardingContract::get_user`] | [`UserProfile`] | Panics with [`Error::UserNotFound`] when absent. |
+// | [`OnboardingContract::get_user_by_username`] | [`UserProfile`] | Looks up by the *normalized* username (lowercased, see `onboard_user`). |
+// | [`OnboardingContract::is_onboarded`] | `bool` | Non-panicking existence check. |
+// | [`OnboardingContract::is_username_taken`] | `bool` | Accepts any casing; normalizes internally. |
+// | [`OnboardingContract::get_user_role`] | [`UserRole`] | Returns [`UserRole::None`] for unknown users. |
+// | [`OnboardingContract::is_verified`] | `bool` | Reflects manual or auto verification. |
+// | [`OnboardingContract::get_user_metrics`] | [`UserMetrics`] | Escrow count / volume used for auto-verification. |
+// | [`OnboardingContract::get_user_reputation`] | `(u32, u32)` | `(successful_trades, disputed_trades)`. |
+// | [`OnboardingContract::get_verification_history`] | `Vec<VerificationEntry>` | Compact entries decoded to human-readable actions. |
+// | [`OnboardingContract::get_verification_queue`] | `Vec<Address>` | Pending manual-verification requests in FIFO order. |
+// | [`OnboardingContract::get_config`] | [`OnboardingConfig`] | Global contract configuration. |
+//
+// ## Event stream
+//
+// Events are the canonical integration signal for indexers; subscribe to these
+// topics rather than polling. Consumers should treat an event as authoritative
+// only after it appears in a closed ledger. Each row lists the topic tuple, the
+// data payload, and the function that emits it.
+//
+// | Topic tuple | Data payload | Emitted by |
+// |-------------|--------------|------------|
+// | `("UserOnboarded",)` | [`UserOnboardedEvent`] `{ user, username, role }` | [`OnboardingContract::onboard_user`] |
+// | `("RoleUpdated",)` | `(user: Address, old_role: UserRole, new_role: UserRole)` | [`OnboardingContract::update_user_role`] |
+// | `("UserVerified",)` | `user: Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+// | `("ProfileDeactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::deactivate_profile`] |
+// | `("ProfileReactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::reactivate_profile`] |
+// | `("UsernameChanged",)` | `user: Address` | [`OnboardingContract::change_username`] |
+// | `("PortfolioUpdated",)` | `user: Address` | [`OnboardingContract::update_portfolio`] |
+//
+// Notes for consumers:
+// - `ProfileDeactivated` / `ProfileReactivated` carry the user **in the topic
+//   tuple** so indexers can filter the stream per user without decoding the
+//   payload; the payload additionally carries the role captured at the time of
+//   the transition so no follow-up profile read is required.
+// - `UserVerified`, `UsernameChanged`, and `PortfolioUpdated` carry only the
+//   address; fetch the current value via [`OnboardingContract::get_user`] when
+//   the new field value is needed.
+// - `UserOnboarded` is emitted exactly once per address — a second
+//   `onboard_user` call for the same address panics with
+//   [`Error::AlreadyOnboarded`] and emits nothing.
+//
+// ## Cross-contract interface
+//
+// Onboarding both calls and is called by the escrow contract:
+// - **Outbound:** during [`OnboardingContract::deactivate_profile`] the contract
+//   invokes [`EscrowInterface::has_active_escrows`] (via the generated
+//   `EscrowClient`) to block deactivation while escrows are open.
+// - **Inbound:** the escrow contract — the address stored in
+//   [`OnboardingConfig::escrow_contract`] — is the only authorized caller of
+//   [`OnboardingContract::update_reputation`],
+//   [`OnboardingContract::update_user_metrics`], and
+//   [`OnboardingContract::update_active_contracts`]. When `escrow_contract` is
+//   `None`, the `platform_admin` is used as the authorized fallback.
+//
+// ## Profile versioning
+//
+// Stored profiles are versioned by [`CURRENT_USER_PROFILE_VERSION`]. Older
+// entries (including the legacy version-less shape) are migrated transparently
+// on first read (internal `try_get_user_profile`); integrators never observe an
+// out-of-date shape through the read API.
 
-
-
+use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
-    Symbol, TryFromVal, Val, Vec,
+    Symbol, IntoVal, TryFromVal, Val, Vec,
 };
+
 extern crate alloc;
 use alloc::string::ToString;
 
+extern crate alloc;
+
+use alloc::string::ToString;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
+    Symbol, IntoVal, TryFromVal, Val, Vec,
+};
+
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
+const READ_TTL_THRESHOLD: u32 = 1_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
-const CURRENT_USER_PROFILE_VERSION: u32 = 4;
+const CURRENT_USER_PROFILE_VERSION: u32 = 5;
+
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
+
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
 
 /// Cooldown period for username changes to prevent squatting and rapid identity rotation.
 /// 30 days in seconds.
 const USERNAME_CHANGE_COOLDOWN: u64 = 30 * 24 * 60 * 60;
 /// Maximum verification history entries retained per user (#519).
 const MAX_VERIFICATION_HISTORY: u32 = 10;
+
+#[cfg(not(target_family = "wasm"))]
+#[path = "decimal_test_token.rs"]
+pub mod decimal_test_token;
 
 #[cfg(test)]
 #[path = "onboarding_test.rs"]
@@ -40,14 +172,19 @@ mod onboarding_test;
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// Maps a user address to their [`UserProfile`]
+    /// Maps a user address to their flat persisted profile record
     UserProfile(Address),
+    /// Dedicated portfolio CID storage keyed by user to keep the main profile flat.
+    UserPortfolio(Address),
     /// Maps a normalized username to the owning address (uniqueness index)
     Username(String),
     /// Contract configuration ([`OnboardingConfig`])
     Config,
     /// Activity metrics per user (escrow count and volume for auto-verification) (#63)
     UserMetrics(Address),
+    /// Active contract counter per user (Issue #39)
+    /// Tracks the number of active escrows/agreements for an address.
+    ActiveContractCount(Address),
     /// Pending manual verification request marker keyed by user (#138)
     VerificationRequest(Address),
     /// Queue head pointer for manual verification requests (#138)
@@ -71,13 +208,6 @@ pub enum DataKey {
     UsernameChangeFeeWallet,
     /// Timestamp of last username change per user - Issue #114
     LastUsernameChange(Address),
-    /// Count of currently-active contracts for a user, maintained by the
-    /// configured escrow contract (Issue #533).
-    ///
-    /// This key lets onboarding flows validate "active contract" constraints
-    /// (e.g. preventing deactivation) without needing a cross-contract call
-    /// back into the escrow contract on every check.
-    ActiveContractCount(Address),
 }
 
 /// User roles in the CraftNexus platform.
@@ -105,7 +235,7 @@ pub enum UserRole {
 ///
 /// A deactivated profile releases the username back to the pool so another
 /// user may claim it. Deactivation is blocked while the user has active
-/// escrows (checked via cross-contract call to the registered EscrowContract).
+/// escrows (checked via cross-contract call to the registered ESCROW_CONTRACT).
 #[contracttype]
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -116,16 +246,17 @@ pub enum ProfileStatus {
     Deactivated = 1,
 }
 
-/// On-chain user profile stored under [`DataKey::UserProfile`].
+/// Public user profile returned by onboarding read/write methods.
 ///
-/// Versioned via the `version` field (current: [`CURRENT_USER_PROFILE_VERSION`]).
-/// Legacy profiles (missing `version` or `status`) are migrated transparently
-/// on first read by [`OnboardingContract::try_get_user_profile`].
+/// The persistent storage layout is flatter than this API model: the core
+/// profile record lives under [`DataKey::UserProfile`], while
+/// `portfolio_cid` is stored separately under [`DataKey::UserPortfolio`].
+/// Callers still receive a single composed struct so the read API remains
+/// stable across storage migrations.
 ///
 /// ## Storage cost note
-/// Each `UserProfile` occupies a persistent storage entry. The `username`
-/// field is a heap-allocated [`String`]; keep it within the configured
-/// `max_username_length` (default 50 bytes) to bound entry size.
+/// Keeping optional heap payloads like `portfolio_cid` out of the main
+/// persistent profile entry reduces Soroban rent for every onboarded user.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -156,6 +287,25 @@ pub struct UserProfile {
     /// subscribe to `PortfolioUpdated` events for live updates.
     pub portfolio_cid: Option<Bytes>,
     /// Status of the user profile - Issue #113
+    pub status: ProfileStatus,
+}
+
+/// Flat persistent representation stored under [`DataKey::UserProfile`].
+///
+/// This shape intentionally omits optional heap payloads so profile rent stays
+/// bounded as the onboarding schema evolves.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct StoredUserProfile {
+    pub version: u32,
+    pub address: Address,
+    pub role: UserRole,
+    pub username: Symbol,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    pub successful_trades: u32,
+    pub disputed_trades: u32,
     pub status: ProfileStatus,
 }
 
@@ -250,6 +400,37 @@ pub struct UserOnboardedEvent {
     pub username: String,
     /// Role the user selected during onboarding
     pub role: UserRole,
+}
+
+/// Event emitted when [`onboard_user`] fails due to a validation error.
+///
+/// Topic: `("OnboardCallFailed",)` — emitted before panicking,
+/// so off-chain indexers can distinguish validation failures from
+/// host panics / network errors without parsing host error codes.
+///
+/// # Note
+/// `reason` is stored as a `u32` (the raw error discriminant) because
+/// `contracterror` types cannot be used as fields of `contracttype`
+/// structs. Off-chain consumers should match on the numeric value
+/// against the [`Error`] enum discriminants.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct OnboardCallFailedEvent {
+    /// The address that attempted to onboard
+    pub user: Address,
+    /// The error discriminant that caused the failure (see [`Error`])
+    pub reason: u32,
+    /// Ledger timestamp when the failure occurred
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoVerifiedEvent {
+    pub user: Address,
+    pub escrow_count: u32,
+    pub volume: u64,
 }
 
 /// A single entry in a user's verification history log (#63).
@@ -446,7 +627,7 @@ pub struct OnboardingConfig {
     pub min_escrow_count_for_verify: u32,
     /// Minimum total volume (7-decimal normalized) for auto-verification (default: 10_000_000_000) (#63)
     pub min_volume_for_verify: i128,
-    /// Address of the EscrowContract authorized to call `update_reputation` / `update_user_metrics`.
+    /// Address of the ESCROW_CONTRACT authorized to call `update_reputation` / `update_user_metrics`.
     /// If `None`, the `platform_admin` is used as fallback caller. (#63, #100)
     pub escrow_contract: Option<Address>,
 }
@@ -491,8 +672,25 @@ pub enum Error {
     ActiveContractUnderflow = 15,
 }
 
+/// Cross-contract interface the onboarding contract uses to query the escrow
+/// contract.
+///
+/// The `#[contractclient]` attribute generates an `EscrowClient` that onboarding
+/// uses to call into the configured [`OnboardingConfig::escrow_contract`]. This
+/// is the only outbound cross-contract dependency of the onboarding contract.
+///
+/// Integrators implementing an escrow-compatible contract must expose a matching
+/// `has_active_escrows` entrypoint with this exact signature, otherwise
+/// [`OnboardingContract::deactivate_profile`] will fail to resolve the call.
 #[soroban_sdk::contractclient(name = "EscrowClient")]
 pub trait EscrowInterface {
+    /// Returns `true` when `user` still has at least one open/active escrow.
+    ///
+    /// Called during [`OnboardingContract::deactivate_profile`] to enforce the
+    /// "no deactivation with active escrows" rule ([`Error::ActiveEscrowsExist`]).
+    ///
+    /// # Parameters
+    /// - `user`: address whose active-escrow status is being queried.
     fn has_active_escrows(env: Env, user: Address) -> bool;
     fn get_platform_config(env: Env) -> crate::PlatformConfig;
 }
@@ -775,6 +973,10 @@ fn utf8_char_len(first_byte: u8) -> usize {
 /// - CIDv1 base32lower (prefix 'b'): lowercase a-z + 2-7
 /// - CIDv1 base16lower (prefix 'f'): lowercase hex 0-9 + a-f
 /// - CIDv1 base58btc  (prefix 'z'): Base58 alphabet
+fn is_base58_btc_char(byte: u8) -> bool {
+    BASE58_BTC_CHARSET[byte as usize]
+}
+
 fn validate_ipfs_cid(cid: &String) -> bool {
     let len = cid.len() as usize;
     if len == 0 || len > 128 {
@@ -789,17 +991,7 @@ fn validate_ipfs_cid(cid: &String) -> bool {
     let is_v0 = len == 46
         && cid_bytes[0] == b'Q'
         && cid_bytes[1] == b'm'
-        && cid_bytes.iter().all(|b| {
-            matches!(
-                *b,
-                b'1'..=b'9'
-                    | b'A'..=b'H'
-                    | b'J'..=b'N'
-                    | b'P'..=b'Z'
-                    | b'a'..=b'k'
-                    | b'm'..=b'z'
-            )
-        });
+        && cid_bytes.iter().all(|b| is_base58_btc_char(*b));
 
     if is_v0 {
         return true;
@@ -850,17 +1042,7 @@ fn validate_ipfs_cid(cid: &String) -> bool {
             if len < 40 || len > 100 {
                 return false;
             }
-            payload.iter().all(|b| {
-                matches!(
-                    *b,
-                    b'1'..=b'9'
-                        | b'A'..=b'H'
-                        | b'J'..=b'N'
-                        | b'P'..=b'Z'
-                        | b'a'..=b'k'
-                        | b'm'..=b'z'
-                )
-            })
+            payload.iter().all(|b| is_base58_btc_char(*b))
         }
         _ => false,
     }
@@ -989,15 +1171,13 @@ impl OnboardingContract {
     ///
     /// Labels are stable API surface for indexers consuming
     /// [`VerificationEntry::action`] via [`OnboardingContract::get_verification_history`].
-   fn verification_action_to_string(env: &Env, action: VerificationActionCode) -> Symbol {
+    fn verification_action_to_string(env: &Env, action: VerificationActionCode) -> Symbol {
         match action {
             VerificationActionCode::Requested => Symbol::new(env, "requested"),
             VerificationActionCode::Approved => Symbol::new(env, "approved"),
             VerificationActionCode::Rejected => Symbol::new(env, "rejected"),
             VerificationActionCode::AutoVerified => Symbol::new(env, "auto_verified"),
-            VerificationActionCode::UsernameChangedRevoked => {
-                Symbol::new(env, "username_revoked")
-            }
+            VerificationActionCode::UsernameChangedRevoked => Symbol::new(env, "username_revoked"),
         }
     }
 
@@ -1209,7 +1389,12 @@ impl OnboardingContract {
         Self::extend_persistent(env, &count_key);
     }
 
-    fn collect_username_change_fee(env: &Env, user: &Address, config: &OnboardingConfig) {
+    fn collect_username_change_fee(
+        env: &Env,
+        user: &Address,
+        config: &OnboardingConfig,
+        snapshotted_token: Option<Address>,
+    ) {
         let fee_amount: i128 = env
             .storage()
             .persistent()
@@ -1222,79 +1407,187 @@ impl OnboardingContract {
 
         Self::extend_persistent(env, &DataKey::UsernameChangeFee);
 
-        let fee_token = Self::read_username_fee_token(env)
-            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        let fee_token = match snapshotted_token {
+            Some(ref token) => {
+                let current = Self::read_username_fee_token(env)
+                    .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+                assert_eq!(current, *token, "Fee token changed mid-call");
+                current
+            }
+            None => Self::read_username_fee_token(env)
+                .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized)),
+        };
         let fee_wallet = Self::read_username_fee_wallet(env, config);
 
         let token_client = token::Client::new(env, &fee_token);
         token_client.transfer(user, &fee_wallet, &fee_amount);
     }
 
-   fn try_get_user_profile(env: &Env, user: Address) -> Option<UserProfile> {
-        let key = DataKey::UserProfile(user.clone());
-        let stored: Val = env.storage().persistent().get(&key)?;
-        let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
-        let version_key = Symbol::new(env, "version");
+    fn string_to_bytes(env: &Env, s: &String) -> Bytes {
+        let mut cid_bytes = Bytes::new(env);
+        let len = s.len() as usize;
+        let mut buf = [0u8; 128];
+        s.copy_into_slice(&mut buf[..len]);
+        cid_bytes.extend_from_slice(&buf[..len]);
+        cid_bytes
+    }
 
-        if map.contains_key(version_key) {
-            let profile = UserProfile::try_from_val(env, &stored).expect("");
-            if profile.version < CURRENT_USER_PROFILE_VERSION {
-                return Some(Self::upgrade_user_profile(env, user, profile));
+    fn stored_to_public(stored: StoredUserProfile, portfolio_cid: Option<Bytes>) -> UserProfile {
+        UserProfile {
+            version: stored.version,
+            address: stored.address,
+            role: stored.role,
+            username: stored.username,
+            registered_at: stored.registered_at,
+            is_verified: stored.is_verified,
+            successful_trades: stored.successful_trades,
+            disputed_trades: stored.disputed_trades,
+            portfolio_cid,
+            status: stored.status,
+        }
+    }
+
+    fn public_to_stored(profile: &UserProfile) -> StoredUserProfile {
+        StoredUserProfile {
+            version: profile.version,
+            address: profile.address.clone(),
+            role: profile.role,
+            username: profile.username.clone(),
+            registered_at: profile.registered_at,
+            is_verified: profile.is_verified,
+            successful_trades: profile.successful_trades,
+            disputed_trades: profile.disputed_trades,
+            status: profile.status,
+        }
+    }
+    fn read_portfolio_cid(env: &Env, user: &Address) -> Option<Bytes> {
+        let key = DataKey::UserPortfolio(user.clone());
+        let portfolio = env.storage().persistent().get(&key);
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(env, &key);
+        }
+        portfolio
+    }
+
+    fn write_portfolio_cid(env: &Env, user: &Address, portfolio_cid: Option<Bytes>) {
+        let key = DataKey::UserPortfolio(user.clone());
+        match portfolio_cid {
+            Some(cid) => {
+                env.storage().persistent().set(&key, &cid);
+                Self::extend_persistent(env, &key);
             }
-            
-            // ---> ADD THIS LINE TO FIX THE TTL BUG <---
-            Self::extend_persistent(env, &key); 
-            
-            return Some(profile);
+            None => {
+                env.storage().persistent().remove(&key);
+            }
+        }
+    }
+
+    fn persist_stored_user_profile(env: &Env, user: &Address, profile: &StoredUserProfile) {
+        let key = DataKey::UserProfile(user.clone());
+        env.storage().persistent().set(&key, profile);
+        Self::extend_persistent(env, &key);
+    }
+
+    fn persist_public_user_profile(env: &Env, user: &Address, profile: &UserProfile) {
+        Self::persist_stored_user_profile(env, user, &Self::public_to_stored(profile));
+        Self::write_portfolio_cid(env, user, profile.portfolio_cid.clone());
+    }
+
+    fn migrate_embedded_versioned_profile(
+        env: &Env,
+        user: &Address,
+        profile: UserProfile,
+    ) -> (StoredUserProfile, bool) {
+        if profile.portfolio_cid.is_some() {
+            Self::write_portfolio_cid(env, user, profile.portfolio_cid.clone());
         }
 
-        let legacy =
-            LegacyUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
-        
-        // Migrate Option<String> to Option<Bytes>
-        let optimized_cid = legacy.portfolio_cid.map(|cid_str| {
-            let mut cid_bytes = Bytes::new(env);
-            let len = cid_str.len() as usize;
-            let mut buf = [0u8; 128]; // Max CID length
-            cid_str.copy_into_slice(&mut buf[..len]);
-            cid_bytes.extend_from_slice(&buf[..len]);
-            cid_bytes
-        });
-
-        let upgraded = UserProfile {
+        let stored = StoredUserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
-            address: legacy.address.clone(),
+            address: profile.address,
+            role: profile.role,
+            username: profile.username,
+            registered_at: profile.registered_at,
+            is_verified: profile.is_verified,
+            successful_trades: profile.successful_trades,
+            disputed_trades: profile.disputed_trades,
+            status: profile.status,
+        };
+        Self::persist_stored_user_profile(env, user, &stored);
+        (stored, true)
+    }
+
+    fn migrate_legacy_profile(
+        env: &Env,
+        user: &Address,
+        legacy: LegacyUserProfile,
+    ) -> StoredUserProfile {
+        if let Some(cid) = legacy.portfolio_cid {
+            Self::write_portfolio_cid(env, user, Some(Self::string_to_bytes(env, &cid)));
+        }
+
+        let stored = StoredUserProfile {
+            version: CURRENT_USER_PROFILE_VERSION,
+            address: legacy.address,
             role: legacy.role,
-            username: legacy.username.clone(),
+            username: legacy.username,
             registered_at: legacy.registered_at,
             is_verified: legacy.is_verified,
             successful_trades: legacy.successful_trades,
             disputed_trades: legacy.disputed_trades,
-            portfolio_cid: optimized_cid,
             status: ProfileStatus::Active,
         };
-        env.storage().persistent().set(&key, &upgraded);
-        Self::extend_persistent(env, &key);
-        Some(upgraded)
+        Self::persist_stored_user_profile(env, user, &stored);
+        stored
+    }
+
+    fn try_get_stored_user_profile(env: &Env, user: Address) -> Option<(StoredUserProfile, bool)> {
+        let key = DataKey::UserProfile(user.clone());
+        let stored: Val = env.storage().persistent().get(&key)?;
+        let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
+        let version_key = Symbol::new(env, "version");
+        let portfolio_key = Symbol::new(env, "portfolio_cid");
+
+        if !map.contains_key(version_key) {
+            let legacy = LegacyUserProfile::try_from_val(env, &stored)
+                .expect("User profile storage corrupted");
+            return Some((Self::migrate_legacy_profile(env, &user, legacy), true));
+        }
+
+        if map.contains_key(portfolio_key) {
+            let profile =
+                UserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
+            return Some(Self::migrate_embedded_versioned_profile(
+                env, &user, profile,
+            ));
+        }
+
+        let mut profile =
+            StoredUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
+        let mut changed = false;
+        if profile.version < CURRENT_USER_PROFILE_VERSION {
+            profile.version = CURRENT_USER_PROFILE_VERSION;
+            changed = true;
+        }
+
+        if changed {
+            Self::persist_stored_user_profile(env, &user, &profile);
+        } else {
+            Self::extend_persistent(env, &key);
+        }
+
+        Some((profile, changed))
+    }
+
+    fn try_get_user_profile(env: &Env, user: Address) -> Option<UserProfile> {
+        let (stored, _) = Self::try_get_stored_user_profile(env, user.clone())?;
+        let portfolio_cid = Self::read_portfolio_cid(env, &user);
+        Some(Self::stored_to_public(stored, portfolio_cid))
     }
 
     fn get_user_profile(env: &Env, user: Address) -> UserProfile {
         Self::try_get_user_profile(env, user)
             .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound))
-    }
-
-    fn upgrade_user_profile(env: &Env, user: Address, mut profile: UserProfile) -> UserProfile {
-        profile.version = CURRENT_USER_PROFILE_VERSION;
-        // Initialize portfolio_cid to None for existing profiles
-        if profile.portfolio_cid.is_none() {
-            profile.portfolio_cid = None;
-        }
-        // Initialize status to Active for existing profiles
-        profile.status = ProfileStatus::Active;
-        let key = DataKey::UserProfile(user);
-        env.storage().persistent().set(&key, &profile);
-        Self::extend_persistent(env, &key);
-        profile
     }
 
     /// Extend the TTL of a persistent storage entry using standardized values.
@@ -1314,6 +1607,12 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
     }
 
     /// TTL-bump variant that first checks the entry exists (Issue #82 optimization).
@@ -1490,10 +1789,7 @@ impl OnboardingContract {
             status: ProfileStatus::Active,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::UserProfile(admin.clone()), &admin_profile);
-        Self::extend_persistent(&env, &DataKey::UserProfile(admin.clone()));
+        Self::persist_public_user_profile(&env, &admin, &admin_profile);
 
         // Reserve the "admin" username
         env.storage()
@@ -1571,6 +1867,37 @@ impl OnboardingContract {
     /// assert_eq!(profile.username, String::from_str(&env, "alice"));
     /// assert!(!profile.is_verified);
     /// ```
+    /// Emit an [`OnboardCallFailedEvent`] before panicking with the given error.
+    fn emit_onboard_failed_and_panic(env: &Env, user: &Address, reason: Error) -> ! {
+        env.events().publish(
+            (Symbol::new(env, "OnboardCallFailed"),),
+            OnboardCallFailedEvent {
+                user: user.clone(),
+                reason: reason as u32,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        env.panic_with_error(reason)
+    }
+
+    /// Onboard a new user, emitting an [`OnboardCallFailedEvent`] and
+    /// panicking with a proper error code on validation failure.
+    ///
+    /// Callers that prefer to handle errors gracefully (without panicking)
+    /// should invoke the auto-generated `try_onboard_user` client method,
+    /// which wraps this function in the host's `try_call` and returns the
+    /// error code as `Err(soroban_sdk::Error)`.
+    ///
+    /// # Security
+    /// * `user.require_auth()` — the registering user signs.
+    /// * `config.platform_admin.require_auth()` — the platform co-signs.
+    ///
+    /// # Errors (panic)
+    /// * [`Error::NotInitialized`] — `initialize` has not been called.
+    /// * [`Error::InvalidRole`] — `role` is not `Buyer` or `Artisan`.
+    /// * [`Error::AlreadyOnboarded`] — the address already has a profile.
+    /// * [`Error::UsernameTaken`] — the normalized username is in use.
+    /// * [`Error::UsernameTooShort`] / [`Error::UsernameTooLong`].
     pub fn onboard_user(env: Env, user: Address, username: String, role: UserRole) -> UserProfile {
         // [SECURITY] Endpoint #93: The registering user must prove ownership of the
         // supplied address. Unauthorized invocation without a valid user signature is
@@ -1578,17 +1905,18 @@ impl OnboardingContract {
         user.require_auth();
 
         // Validate role is valid (only Buyer or Artisan for self-onboarding)
-        assert!(
-            role == UserRole::Buyer || role == UserRole::Artisan,
-            "Invalid role: can only onboard as Buyer or Artisan"
-        );
+        if role != UserRole::Buyer && role != UserRole::Artisan {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::InvalidRole);
+        }
 
         // Get configuration
         let config: OnboardingConfig = env
             .storage()
             .persistent()
             .get(&DataKey::Config)
-            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+            .unwrap_or_else(|| {
+                Self::emit_onboard_failed_and_panic(&env, &user, Error::NotInitialized)
+            });
         Self::extend_persistent(&env, &DataKey::Config);
 
         // [SECURITY] Issue #621: Reject onboarding if the escrow contract is paused.
@@ -1604,24 +1932,24 @@ impl OnboardingContract {
         // registrations. The platform admin must co-sign every onboarding transaction
         // to prevent unauthorized state transitions.
         config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
 
         // Normalize the username (lowercase + trim whitespace)
         let normalized = normalize_username(&env, &username);
-        
+
         // Convert to Symbol for optimized storage
         let username_len = core::cmp::min(normalized.len() as usize, 32);
         let mut user_buf = [0u8; 32];
         normalized.copy_into_slice(&mut user_buf[..username_len]);
         let s = core::str::from_utf8(&user_buf[..username_len]).unwrap();
         let optimized_username = Symbol::new(&env, s);
-        assert!(
-            username_len >= config.min_username_length as usize,
-            "Username too short"
-        );
-        assert!(
-            username_len <= config.max_username_length as usize,
-            "Username too long"
-        );
+
+        if (username_len as u32) < config.min_username_length {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTooShort);
+        }
+        if (username_len as u32) > config.max_username_length {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTooLong);
+        }
 
         // Check if user already onboarded (#92).
         //
@@ -1644,28 +1972,25 @@ impl OnboardingContract {
         //     preferred way to check onboarding status; avoid probing this storage
         //     key directly, as TTL expiry can make `has` return `false` for users
         //     who have not interacted with the contract recently.
-        //   - `onboard_user` panics (no return value) on a duplicate call, so
-        //     client code should guard with a `get_user` probe or catch the error
-        //     via `try_invoke_contract` before calling this function.
+        //   - `onboard_user` panics on a duplicate call, so client code should
+        //     guard with a `get_user` probe or catch the error via the auto-generated
+        //     `try_onboard_user` client method.
         //   - Profile shape is versioned via `CURRENT_USER_PROFILE_VERSION`; any
         //     schema change requires a migration via `migrate_user_profile`.
-        let existing: Option<UserProfile> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::UserProfile(user.clone()));
+        let existing = Self::try_get_stored_user_profile(&env, user.clone());
         if existing.is_some() {
             Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::AlreadyOnboarded);
         }
 
-        assert!(existing.is_none(), "User already onboarded");
-
         // Check username uniqueness
-        assert!(
-            !env.storage()
-                .persistent()
-                .has(&DataKey::Username(normalized.clone())),
-            "Username already taken"
-        );
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Username(normalized.clone()))
+        {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTaken);
+        }
 
         // Create user profile with normalized username
         let profile = UserProfile {
@@ -1682,10 +2007,7 @@ impl OnboardingContract {
         };
 
         // Store profile
-        env.storage()
-            .persistent()
-            .set(&DataKey::UserProfile(user.clone()), &profile);
-        Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+        Self::persist_public_user_profile(&env, &user, &profile);
 
         // Store username → address mapping for uniqueness enforcement.
         //
@@ -1789,6 +2111,24 @@ impl OnboardingContract {
     /// `Error::UserNotFound`.
     pub fn get_user(env: Env, user: Address) -> UserProfile {
         Self::get_user_profile(&env, user)
+    }
+
+    /// Migrate one user profile to the latest flat storage schema (admin only).
+    ///
+    /// Returns `true` when this call rewrote persistent storage and `false`
+    /// when the profile was already at the current schema version.
+    pub fn migrate_user_profile(env: Env, user: Address) -> bool {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+        config.platform_admin.require_auth();
+
+        let (_, changed) = Self::try_get_stored_user_profile(&env, user)
+            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
+        changed
     }
 
     /// Check if the user has any active escrows on the configured escrow contract.
@@ -2030,6 +2370,7 @@ impl OnboardingContract {
     /// # Returns
     /// Updated `UserProfile` with the new Moderator role assigned.
     pub fn set_moderator(env: Env, user: Address) -> UserProfile {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         let config: OnboardingConfig = env
             .storage()
             .persistent()
@@ -2069,7 +2410,7 @@ impl OnboardingContract {
     /// # Reverts if
     /// - Caller is not the platform admin (authorization check fails)
     /// - User not found in persistent storage
-    /// - New role is Admin or None (invalid assignment)
+    /// - New role is Admin or None (invalid assignment - prevents unauthorized role escalation)
     /// - Config not initialized
     pub fn update_user_role(env: Env, user: Address, new_role: UserRole) -> UserProfile {
         // Security: Get config to verify admin authorization
@@ -2078,11 +2419,11 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
         // [SECURITY] Endpoint #85: Strict authorization check
         // Only admin can update roles; require_auth() verifies the caller's digital signature
         config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
 
         // [SECURITY] Validate new role assignment; prevent unauthorized role escalation
         match new_role {
@@ -2101,10 +2442,7 @@ impl OnboardingContract {
         profile.role = new_role.clone();
 
         // Store updated profile
-        env.storage()
-            .persistent()
-            .set(&DataKey::UserProfile(user.clone()), &profile);
-        Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+        Self::persist_public_user_profile(&env, &user, &profile);
 
         // Issue #520 — event now carries (user, old_role, new_role) so
         // downstream consumers don't need a follow-up read to know what
@@ -2141,7 +2479,8 @@ impl OnboardingContract {
     /// # Preconditions
     /// - User must be onboarded (have an existing profile)
     /// - Profile must not already be deactivated
-    /// - User must not have active escrows (checked via escrow contract)
+    /// - User must not have active escrows (checked via the configured escrow contract)
+    /// - If no escrow contract is registered, deactivation is rejected conservatively because active escrow obligations cannot be verified
     /// - Admin user profile cannot be deactivated
     ///
     /// # Reverts if
@@ -2157,6 +2496,7 @@ impl OnboardingContract {
             env.panic_with_error(Error::ProfileDeactivated);
         }
 
+        // Replace the old to_string().as_ref() line with this:
         let username_string = String::from_str(&env, profile.username.to_string().as_ref());
         let normalized = normalize_username(&env, &username_string);
         if normalized == String::from_str(&env, "admin") {
@@ -2184,6 +2524,8 @@ impl OnboardingContract {
             if client.has_active_escrows(&user) {
                 env.panic_with_error(Error::ActiveEscrowsExist);
             }
+        } else {
+            env.panic_with_error(Error::ActiveEscrowsExist);
         }
 
         // Release username so others can take it
@@ -2193,10 +2535,7 @@ impl OnboardingContract {
 
         // Update profile state
         profile.status = ProfileStatus::Deactivated;
-        env.storage()
-            .persistent()
-            .set(&DataKey::UserProfile(user.clone()), &profile);
-        Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+        Self::persist_public_user_profile(&env, &user, &profile);
 
         // Issue #524 — event payload now carries the user's role at
         // deactivation time. The role was overwritten in the
@@ -2250,19 +2589,14 @@ impl OnboardingContract {
     pub fn reactivate_profile(env: Env, user: Address) -> UserProfile {
         user.require_auth();
 
-        let profile_key = DataKey::UserProfile(user.clone());
-        let mut profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&profile_key)
-            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
-        Self::extend_persistent(&env, &profile_key);
+        let mut profile = Self::get_user_profile(&env, user.clone());
 
         if profile.status != ProfileStatus::Deactivated {
             env.panic_with_error(Error::ProfileDeactivated);
         }
 
         // Re-claim username — fail if another user took it while deactivated
+        // Replace the old to_string().as_ref() line with this:
         let username_string = String::from_str(&env, profile.username.to_string().as_ref());
         let normalized = normalize_username(&env, &username_string);
         if env
@@ -2278,8 +2612,7 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &DataKey::Username(normalized));
 
         profile.status = ProfileStatus::Active;
-        env.storage().persistent().set(&profile_key, &profile);
-        Self::extend_persistent(&env, &profile_key);
+        Self::persist_public_user_profile(&env, &user, &profile);
 
         env.events().publish(
             (Symbol::new(&env, "ProfileReactivated"), user.clone()),
@@ -2330,10 +2663,10 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
         // Only admin can verify users
         config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
 
         // Get existing profile
         let mut profile = Self::get_user_profile(&env, user.clone());
@@ -2342,10 +2675,7 @@ impl OnboardingContract {
         profile.is_verified = true;
 
         // Store updated profile
-        env.storage()
-            .persistent()
-            .set(&DataKey::UserProfile(user.clone()), &profile);
-        Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+        Self::persist_public_user_profile(&env, &user, &profile);
 
         // Emit event
         env.events()
@@ -2367,6 +2697,7 @@ impl OnboardingContract {
     /// # Errors
     /// - Panics with [`Error::NotInitialized`] if config is missing.
     pub fn get_config(env: Env) -> OnboardingConfig {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         env.storage()
             .persistent()
             .get(&DataKey::Config)
@@ -2420,13 +2751,7 @@ impl OnboardingContract {
     /// None.
     pub fn is_verified(env: Env, user: Address) -> bool {
         user.require_auth();
-        let profile_key = DataKey::UserProfile(user.clone());
-        if let Some(profile) = env
-            .storage()
-            .persistent()
-            .get::<_, UserProfile>(&profile_key)
-        {
-            Self::extend_persistent(&env, &profile_key);
+        if let Some(profile) = Self::try_get_user_profile(&env, user) {
             profile.is_verified
         } else {
             false
@@ -2437,7 +2762,7 @@ impl OnboardingContract {
     // Issue #63 – Artisan Verification Logic Enhancement
     // -----------------------------------------------------------------------
 
-    /// Register the address of the deployed EscrowContract so it can update
+    /// Register the address of the deployed ESCROW_CONTRACT so it can update
     /// reputation and activity metrics via cross-contract calls (admin only).
     ///
     /// # Security — issue #498
@@ -2661,13 +2986,13 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
-        // Only the registered escrow contract (or admin if none set) may call this.
         match config.escrow_contract {
             Some(ref escrow_addr) => escrow_addr.require_auth(),
             None => config.platform_admin.require_auth(),
         }
+        Self::extend_persistent(&env, &DataKey::Config);
+        Self::extend_persistent(&env, &DataKey::Config);
 
         let key = DataKey::UserMetrics(address.clone());
         let mut metrics = Self::read_user_metrics(&env, &address);
@@ -2749,7 +3074,11 @@ impl OnboardingContract {
         }
 
         let key = DataKey::ActiveContractCount(user.clone());
-        let current = env.storage().persistent().get::<_, u32>(&key).unwrap_or(0u32);
+        let current = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&key)
+            .unwrap_or(0u32);
         if env.storage().persistent().has(&key) {
             Self::extend_persistent(&env, &key);
         }
@@ -2797,9 +3126,7 @@ impl OnboardingContract {
             return;
         }
 
-        let profile_key = DataKey::UserProfile(address.clone());
-        let profile_opt: Option<UserProfile> = env.storage().persistent().get(&profile_key);
-        let mut profile = match profile_opt {
+        let mut profile = match Self::try_get_user_profile(env, address.clone()) {
             Some(p) => p,
             None => return,
         };
@@ -2812,29 +3139,25 @@ impl OnboardingContract {
             && metrics.total_volume >= config.min_volume_for_verify
         {
             profile.is_verified = true;
-            env.storage().persistent().set(&profile_key, &profile);
-            Self::extend_persistent(env, &profile_key);
+            Self::persist_public_user_profile(env, &address, &profile);
+
+            // Emit distinct AutoVerifiedEvent to fulfill #654 architecture requirements
+            env.events().publish(
+                (Symbol::new(env, "AutoVerifiedEvent"), address.clone()),
+                AutoVerifiedEvent {
+                    user: address.clone(),
+                    escrow_count: metrics.total_escrow_count,
+                    volume: metrics.total_volume as u64,
+                },
+            );
 
             // Append auto-verify entry to history
-            let hist_key = DataKey::VerificationHistory(address.clone());
-            let mut history: Vec<VerificationEntry> = env
-                .storage()
-                .persistent()
-                .get(&hist_key)
-                .unwrap_or(Vec::new(env));
-            history.push_back(VerificationEntry {
-                timestamp: env.ledger().timestamp(),
-                action: Symbol::new(env, "auto_verified"),
-                by: None,
-            });
-            if history.len() > 10 {
-                history.remove(0);
-            }
-            env.storage().persistent().set(&hist_key, &history);
-            Self::extend_persistent(env, &hist_key);
-
-            env.events()
-                .publish((Symbol::new(env, "UserVerified"),), address);
+            Self::append_verification_history(
+                env,
+                address,
+                VerificationActionCode::AutoVerified,
+                None,
+            );
         }
     }
 
@@ -2869,13 +3192,7 @@ impl OnboardingContract {
             return false;
         }
 
-        let profile_key = DataKey::UserProfile(address.clone());
-        let profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&profile_key)
-            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
-        Self::extend_persistent(&env, &profile_key);
+        let profile = Self::get_user_profile(&env, address.clone());
 
         if profile.is_verified {
             return false;
@@ -2911,13 +3228,7 @@ impl OnboardingContract {
     pub fn request_verification(env: Env, user: Address) {
         user.require_auth();
 
-        let profile_key = DataKey::UserProfile(user.clone());
-        let profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&profile_key)
-            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
-        Self::extend_persistent(&env, &profile_key);
+        let profile = Self::get_user_profile(&env, user.clone());
 
         // Only Buyers and Artisans may request manual verification.
         // Admins and Moderators are assigned their roles directly and bypass
@@ -3006,17 +3317,10 @@ impl OnboardingContract {
         // never reach the profile mutation, queue update, or event emission below.
         config.platform_admin.require_auth();
 
-        let profile_key = DataKey::UserProfile(user.clone());
-        let mut profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&profile_key)
-            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
-        Self::extend_persistent(&env, &profile_key);
+        let mut profile = Self::get_user_profile(&env, user.clone());
 
         profile.is_verified = approve;
-        env.storage().persistent().set(&profile_key, &profile);
-        Self::extend_persistent(&env, &profile_key);
+        Self::persist_public_user_profile(&env, &user, &profile);
 
         Self::clear_verification_request(&env, &user);
 
@@ -3184,7 +3488,7 @@ impl OnboardingContract {
 
     /// Update a user's reputation counters.
     ///
-    /// Called by the EscrowContract after a state change (release / refund /
+    /// Called by the ESCROW_CONTRACT after a state change (release / refund /
     /// resolve). Increments `successful_trades` and/or `disputed_trades` on
     /// the user's profile using saturating addition to prevent overflow.
     /// Silently skips users who are not onboarded (no panic).
@@ -3230,21 +3534,15 @@ impl OnboardingContract {
             None => config.platform_admin.require_auth(),
         }
 
-        let profile_key = DataKey::UserProfile(address.clone());
-        let profile_opt: Option<UserProfile> = env.storage().persistent().get(&profile_key);
-        let mut profile = match profile_opt {
-            Some(p) => {
-                Self::extend_persistent(&env, &profile_key);
-                p
-            }
+        let mut profile = match Self::try_get_user_profile(&env, address.clone()) {
+            Some(p) => p,
             None => return, // User not onboarded; skip silently
         };
 
         profile.successful_trades = profile.successful_trades.saturating_add(successful_delta);
         profile.disputed_trades = profile.disputed_trades.saturating_add(disputed_delta);
 
-        env.storage().persistent().set(&profile_key, &profile);
-        Self::extend_persistent(&env, &profile_key);
+        Self::persist_public_user_profile(&env, &address, &profile);
     }
 
     /// Get a user's reputation counters.
@@ -3266,19 +3564,10 @@ impl OnboardingContract {
     /// # Returns
     /// Tuple `(successful_trades, disputed_trades)`.
     pub fn get_user_reputation(env: Env, address: Address) -> (u32, u32) {
-        // Issue #426/#434: require auth to prevent unauthorized access to sensitive trade data
+        // Issue #426/#434/#446: require auth to prevent unauthorized access to sensitive trade data
         address.require_auth();
-        let key = DataKey::UserProfile(address.clone());
-        match env
-            .storage()
-            .persistent()
-            .get::<DataKey, UserProfile>(&key)
-        {
-            Some(profile) => {
-                // Issue #423/#435: extend TTL on read to prevent storage expiry
-                Self::extend_persistent(&env, &key);
-                (profile.successful_trades, profile.disputed_trades)
-            }
+        match Self::try_get_user_profile(&env, address) {
+            Some(profile) => (profile.successful_trades, profile.disputed_trades),
             None => (0, 0),
         }
     }
@@ -3353,14 +3642,11 @@ impl OnboardingContract {
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
         Self::extend_persistent(&env, &DataKey::Config);
 
+        // Snapshot fee token before any state changes (CEI safety)
+        let snapshotted_fee_token = Self::read_username_fee_token(&env);
+
         // Get current user profile
-        let profile_key = DataKey::UserProfile(user.clone());
-        let mut profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&profile_key)
-            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
-        Self::extend_persistent(&env, &profile_key);
+        let mut profile = Self::get_user_profile(&env, user.clone());
 
         // Normalize the new username
         let normalized_new = normalize_username(&env, &new_username);
@@ -3404,7 +3690,9 @@ impl OnboardingContract {
         // Atomically remove old username mapping and add new one
         let old_username = profile.username.clone();
         let old_string = String::from_str(&env, old_username.to_string().as_ref());
-        env.storage().persistent().remove(&DataKey::Username(old_string));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(old_string));
 
         // Store new username → address mapping
         env.storage()
@@ -3422,8 +3710,7 @@ impl OnboardingContract {
         profile.is_verified = false;
 
         // Store updated profile
-        env.storage().persistent().set(&profile_key, &profile);
-        Self::extend_persistent(&env, &profile_key);
+        Self::persist_public_user_profile(&env, &user, &profile);
 
         // Record timestamp of username change
         env.storage().persistent().set(
@@ -3455,7 +3742,7 @@ impl OnboardingContract {
             .publish((Symbol::new(&env, "UsernameChanged"),), &user);
 
         // Interaction (CEI pattern: external transfer is the last step)
-        Self::collect_username_change_fee(&env, &user, &config);
+        Self::collect_username_change_fee(&env, &user, &config, snapshotted_fee_token);
 
         profile
     }
@@ -3705,15 +3992,16 @@ impl OnboardingContract {
     /// - Pass `None` to clear an existing portfolio link.
     ///
     /// ## Storage side-effects
-    /// - Reads, writes, and extends TTL on
-    ///   `DataKey::UserProfile(user)`, updating only
-    ///   `UserProfile.portfolio_cid`. All other profile fields —
-    ///   including `version` (`CURRENT_USER_PROFILE_VERSION`), role,
-    ///   verification status, and reputation counters — are preserved.
-    /// - No username-index or config keys are touched. Storage rent for
-    ///   the profile entry grows only when a non-empty CID string is
-    ///   stored; setting `None` removes the optional payload and reduces
-    ///   entry size.
+    /// - Reads and extends TTL on `DataKey::UserProfile(user)` to validate the
+    ///   caller and preserve the core profile.
+    /// - Writes/removes `DataKey::UserPortfolio(user)` for the CID payload.
+    ///   All other profile fields — including `version`
+    ///   (`CURRENT_USER_PROFILE_VERSION`), role, verification status, and
+    ///   reputation counters — are preserved without rewriting the main
+    ///   profile entry.
+    /// - No username-index or config keys are touched. Storage rent for the
+    ///   core profile stays flat; only the dedicated portfolio key grows when
+    ///   a non-empty CID is present.
     ///
     /// ## Emitted event — `PortfolioUpdated`
     /// - **Topics:** `(Symbol::new("PortfolioUpdated"),)`
@@ -3745,13 +4033,7 @@ impl OnboardingContract {
         user.require_auth();
 
         // Get current user profile
-        let profile_key = DataKey::UserProfile(user.clone());
-        let mut profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&profile_key)
-            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
-        Self::extend_persistent(&env, &profile_key);
+        let mut profile = Self::get_user_profile(&env, user.clone());
 
         // Only artisans can update their portfolio
         assert!(
@@ -3763,21 +4045,11 @@ impl OnboardingContract {
         if let Some(ref cid) = portfolio_cid {
             assert!(validate_ipfs_cid(cid), "Invalid portfolio CID format");
         }
-        let optimized_cid = portfolio_cid.map(|cid_str| {
-            let mut cid_bytes = Bytes::new(&env);
-            let len = cid_str.len() as usize;
-            let mut buf = [0u8; 128];
-            cid_str.copy_into_slice(&mut buf[..len]);
-            cid_bytes.extend_from_slice(&buf[..len]);
-            cid_bytes
-        });
+        let optimized_cid = portfolio_cid.map(|cid_str| Self::string_to_bytes(&env, &cid_str));
 
         // Update portfolio CID
+        Self::write_portfolio_cid(&env, &user, optimized_cid.clone());
         profile.portfolio_cid = optimized_cid;
-
-        // Store updated profile
-        env.storage().persistent().set(&profile_key, &profile);
-        Self::extend_persistent(&env, &profile_key);
 
         // Emit event
         env.events()
