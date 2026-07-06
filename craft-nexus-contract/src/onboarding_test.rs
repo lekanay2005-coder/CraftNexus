@@ -2416,3 +2416,39 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
 }
+
+// ===== Pause-state guard (Issue #621) =====
+
+#[test]
+fn test_onboard_rejected_when_escrow_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    let escrow_id = env.register_contract(None, crate::CraftNexusContract);
+    let escrow_client = crate::CraftNexusContractClient::new(&env, &escrow_id);
+
+    let platform_wallet = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+    escrow_client.initialize(
+        &platform_wallet,
+        &admin,
+        &arbitrator,
+        &500,
+        &Some(client.address.clone()),
+    );
+
+    client.set_escrow_contract(&escrow_id);
+
+    // Pause the escrow contract
+    escrow_client.set_paused(&true);
+
+    // Onboarding should be rejected
+    let result = client.try_onboard_user(
+        &user,
+        &String::from_str(&env, "newuser"),
+        &UserRole::Buyer,
+    );
+    assert!(result.is_err());
+}

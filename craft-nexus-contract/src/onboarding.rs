@@ -83,18 +83,10 @@
 use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
-    Symbol, IntoVal, TryFromVal, Val, Vec,
+    Symbol, TryFromVal, Val, Vec,
 };
 
-extern crate alloc;
 
-extern crate alloc;
-
-use alloc::string::ToString;
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
-    Symbol, IntoVal, TryFromVal, Val, Vec,
-};
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
@@ -669,6 +661,8 @@ pub enum Error {
     CooldownActive = 14,
     /// Attempted to decrement active contract count below zero
     ActiveContractUnderflow = 15,
+    /// The escrow contract is paused — onboarding is temporarily disabled
+    ContractPaused = 16,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -691,6 +685,8 @@ pub trait EscrowInterface {
     /// # Parameters
     /// - `user`: address whose active-escrow status is being queried.
     fn has_active_escrows(env: Env, user: Address) -> bool;
+    /// Returns `true` when the escrow contract is paused.
+    fn is_paused(env: Env) -> bool;
 }
 
 /// Normalize a raw username string into its canonical on-chain form.
@@ -1922,6 +1918,16 @@ impl OnboardingContract {
         // to prevent unauthorized state transitions.
         config.platform_admin.require_auth();
         Self::extend_persistent(&env, &DataKey::Config);
+
+        // [SECURITY] Issue #621: Reject onboarding while the escrow contract is paused.
+        // When an escrow contract is configured, query it for pause state before allowing
+        // new user registration.
+        if let Some(ref escrow_addr) = config.escrow_contract {
+            let escrow_client = EscrowClient::new(&env, escrow_addr);
+            if escrow_client.is_paused() {
+                Self::emit_onboard_failed_and_panic(&env, &user, Error::ContractPaused);
+            }
+        }
 
         // Normalize the username (lowercase + trim whitespace)
         let normalized = normalize_username(&env, &username);
