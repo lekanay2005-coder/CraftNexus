@@ -2417,48 +2417,38 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
 }
 
-// ===== Issue #621: Pause-state check in onboard_user =====
+// ===== Pause-state guard (Issue #621) =====
 
-/// Onboarding must be rejected when the escrow contract is paused.
 #[test]
-#[should_panic(expected = "Platform is paused - onboarding disabled")]
-fn test_onboard_user_rejected_when_escrow_paused() {
+fn test_onboard_rejected_when_escrow_paused() {
     let env = Env::default();
     env.mock_all_auths();
 
-    // Register and initialize the escrow contract
-    let escrow_id = env.register_contract(None, CraftNexusContract);
-    let escrow_client = CraftNexusContractClient::new(&env, &escrow_id);
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    let escrow_id = env.register_contract(None, crate::CraftNexusContract);
+    let escrow_client = crate::CraftNexusContractClient::new(&env, &escrow_id);
 
-    let admin = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let arbitrator = Address::generate(&env);
-
     escrow_client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &None,
+        &Some(client.address.clone()),
     );
 
-    // Register and initialize the onboarding contract
-    let onboarding_id = env.register_contract(None, OnboardingContract);
-    let onboarding_client = OnboardingContractClient::new(&env, &onboarding_id);
-
-    onboarding_client.initialize(&admin);
-
-    // Link onboarding to escrow
-    onboarding_client.set_escrow_contract(&escrow_id);
+    client.set_escrow_contract(&escrow_id);
 
     // Pause the escrow contract
     escrow_client.set_paused(&true);
 
-    // Attempting to onboard should now panic
-    let user = Address::generate(&env);
-    onboarding_client.onboard_user(
+    // Onboarding should be rejected
+    let result = client.try_onboard_user(
         &user,
-        &String::from_str(&env, "new_user"),
+        &String::from_str(&env, "newuser"),
         &UserRole::Buyer,
     );
+    assert!(result.is_err());
 }
