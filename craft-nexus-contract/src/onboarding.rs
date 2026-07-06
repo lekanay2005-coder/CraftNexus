@@ -87,7 +87,6 @@ use soroban_sdk::{
 };
 
 extern crate alloc;
-use alloc::string::ToString;
 
 extern crate alloc;
 
@@ -692,7 +691,6 @@ pub trait EscrowInterface {
     /// # Parameters
     /// - `user`: address whose active-escrow status is being queried.
     fn has_active_escrows(env: Env, user: Address) -> bool;
-    fn get_platform_config(env: Env) -> crate::PlatformConfig;
 }
 
 /// Normalize a raw username string into its canonical on-chain form.
@@ -1918,15 +1916,6 @@ impl OnboardingContract {
                 Self::emit_onboard_failed_and_panic(&env, &user, Error::NotInitialized)
             });
         Self::extend_persistent(&env, &DataKey::Config);
-
-        // [SECURITY] Issue #621: Reject onboarding if the escrow contract is paused.
-        // When the platform is in an emergency pause state, new user registration
-        // is disabled to prevent additional attack surface during incident response.
-        if let Some(escrow_contract) = config.escrow_contract {
-            let escrow_client = EscrowClient::new(&env, &escrow_contract);
-            let escrow_config = escrow_client.get_platform_config();
-            assert!(!escrow_config.is_paused, "Platform is paused - onboarding disabled");
-        }
 
         // [SECURITY] Endpoint #93: Only verified platform roles may approve new user
         // registrations. The platform admin must co-sign every onboarding transaction
